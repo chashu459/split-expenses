@@ -118,6 +118,22 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 .btn.primary { background: var(--green); border-color: var(--green); color: #fff; font-weight: 600; }
 .btn.primary:active { background: var(--green-dark); }
 .btn.block { display: block; width: 100%; margin: 10px 0; }
+.btn.danger { color: var(--red); border-color: #fca5a5; }
+.btn.danger:active { background: #fee2e2; }
+.btn.venmo {
+  border-color: #008CFF; color: #008CFF; font-weight: 600;
+  text-align: center; text-decoration: none;
+}
+.btn.venmo:active { background: #e8f4ff; }
+#venmo-wrap:empty { display: none; }
+#venmo-wrap { margin-bottom: 4px; }
+
+/* edit affordance on expense rows (replaces the old × delete button) */
+.edit-btn {
+  background: none; border: none; color: var(--muted);
+  font-size: 17px; cursor: pointer; line-height: 1; padding: 4px 7px; border-radius: 6px;
+}
+.edit-btn:active { background: #e5e7eb; color: var(--ink); }
 
 #overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.45);
@@ -135,10 +151,12 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 }
 .modal h2 { margin: 0 0 14px; font-size: 18px; }
 .modal label { display: block; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
-.modal input, .modal select {
+.modal input, .modal select, .modal textarea {
   display: block; width: 100%; margin-top: 5px; font-size: 16px; color: var(--ink);
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff;
+  font-family: inherit;
 }
+.modal textarea { resize: vertical; min-height: 88px; }
 .row2 { display: flex; gap: 10px; }
 .row2 label { flex: 1; }
 .checks { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
@@ -151,6 +169,14 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 .check input { width: auto !important; margin: 0 !important; }
 .modal-actions { display: flex; gap: 10px; margin-top: 6px; }
 .modal-actions .btn { flex: 1; }
+
+/* date grouping on the expenses tab */
+.date-head {
+  font-size: 13px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .05em;
+  margin: 20px 2px 8px;
+}
+.date-head:first-child { margin-top: 4px; }
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%) translateY(80px);
@@ -217,3 +243,7 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 /* receipt link */
 .receipt { text-decoration: none; margin-left: 4px; }
 a.receipt { cursor: pointer; }
+
+/* footer */
+.foot { text-align: center; margin: 26px 0 10px; font-size: 13px; color: var(--muted); }
+.foot a { color: var(--muted); }

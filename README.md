@@ -32,6 +32,20 @@ friend's browser ──▶ static web page (frontend/)
 - The UI updates **optimistically** — buttons respond instantly while the
   save happens in the background (a spinner in the header shows sync state),
   so double-taps can't create duplicates.
+- **Batch-add members**: paste one name per line, with an optional trailing
+  `@venmo-handle`. The group creator is added automatically.
+- **Venmo integration**: if a member has a Venmo handle, the "record a
+  payment" form shows a *Pay with Venmo* button that deep-links into Venmo
+  with the amount, recipient, and note prefilled.
+- **Edit expenses** any time (the delete button lives inside the edit form).
+- The Expenses tab is grouped by date (**Today / Yesterday / …**) and shows
+  **your personal share** on each row (what you lent or borrowed), not just
+  the total.
+- **Delete a group** from the bottom of its page — with a warning if balances
+  aren't settled. Deletes are **soft**: expenses, payments, and groups are
+  flagged as deleted and hidden, never removed from the sheet.
+- Every change is written to an **`activity` tab** in the sheet — an
+  append-only audit log of who added/edited/removed what.
 - The Apps Script uses `LockService` so two friends saving at once can't corrupt a row.
 - The frontend sends POST bodies as `text/plain` (no `Content-Type` header) so the
   browser skips the CORS preflight that Apps Script web apps can't answer.

@@ -37,14 +37,18 @@ function makeSheet(header) {
 }
 const sheets = {
   groups: makeSheet(['id', 'name', 'created_at']),
-  members: makeSheet(['id', 'group_id', 'name']),
+  members: makeSheet(['id', 'group_id', 'name', 'venmo']),
   expenses: makeSheet(['id', 'group_id', 'description', 'amount_cents', 'paid_by', 'split_among', 'date', 'created_at']),
   settlements: makeSheet(['id', 'group_id', 'from_id', 'to_id', 'amount_cents', 'date', 'created_at']),
 };
 global.SpreadsheetApp = {
   getActiveSpreadsheet: () => ({
     getSheetByName: (n) => sheets[n] || null,
-    insertSheet: (n) => (sheets[n] = makeSheet([])),
+    insertSheet: (n) => {
+      const sh = makeSheet([]);
+      sh._rows.length = 0; // a brand-new sheet has no rows at all (header appended next)
+      return (sheets[n] = sh);
+    },
   }),
 };
 global.LockService = {
@@ -304,6 +308,159 @@ t('bootstrap adds missing columns to an existing sheet', () => {
   assert.strictEqual(old.description, 'Old');
   assert.strictEqual(old.shares, null);
   assert.strictEqual(old.receipt_id, '');
+});
+
+t('addMember stores venmo handle (leading @ stripped)', () => {
+  const { res } = post({ action: 'addMember', id: 'm-v1', groupId: 'g1', name: 'Cy', venmo: '@cy-pays' });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.member.venmo, 'cy-pays');
+  const { res: st } = get('state');
+  assert.strictEqual(st.state.members.find((m) => m.id === 'm-v1').venmo, 'cy-pays');
+});
+
+t('addMember rejects a bad venmo handle', () => {
+  const { res } = post({ action: 'addMember', id: 'm-v2', groupId: 'g1', name: 'Dee', venmo: 'not a handle!' });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /venmo/);
+});
+
+t('addMembers batch: adds new, skips duplicate names', () => {
+  const { res } = post({
+    action: 'addMembers', groupId: 'g1',
+    members: [
+      { id: 'm-b1', name: 'Eli', venmo: 'eli123' },
+      { id: 'm-b2', name: 'Fay' },
+      { id: 'm-b3', name: 'ann' }, // duplicate of m1 'Ann'
+    ],
+  });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.members.length, 2);
+  assert.strictEqual(res.skipped, 1);
+  assert.strictEqual(res.members[0].venmo, 'eli123');
+  assert.strictEqual(res.members[1].venmo, '');
+});
+
+t('addMembers is idempotent on member id', () => {
+  const body = { action: 'addMembers', groupId: 'g1', members: [{ id: 'm-b1', name: 'Eli' }] };
+  const { res } = post(body);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.members.length, 0);
+  assert.strictEqual(res.skipped, 1);
+});
+
+t('updateExpense edits an expense in place', () => {
+  let r = post({
+    action: 'addExpense', id: 'e-upd', groupId: 'g1', description: 'Lunch',
+    amountCents: 5000, paidBy: 'm1', splitAmong: ['m1', 'm2'], date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, true);
+  const before = r.res.state.expenses.find((e) => e.id === 'e-upd');
+  r = post({
+    action: 'updateExpense', id: 'e-upd', groupId: 'g1', description: 'Fancy lunch',
+    amountCents: 8000, paidBy: 'm2', splitAmong: ['m2'], date: '2026-10-18',
+  });
+  assert.strictEqual(r.res.ok, true);
+  const ex = r.res.expense;
+  assert.strictEqual(ex.description, 'Fancy lunch');
+  assert.strictEqual(ex.amount_cents, 8000);
+  assert.strictEqual(ex.paid_by, 'm2');
+  assert.deepStrictEqual(ex.split_among, ['m2']);
+  assert.strictEqual(ex.date, '2026-10-18');
+  assert.strictEqual(ex.receipt_id, before.receipt_id);
+  assert.strictEqual(ex.created_at, before.created_at);
+  assert.strictEqual(r.res.state.expenses.filter((e) => e.id === 'e-upd').length, 1);
+});
+
+t('updateExpense rejects unknown id and bad shares', () => {
+  let r = post({
+    action: 'updateExpense', id: 'nope', groupId: 'g1', description: 'x',
+    amountCents: 100, paidBy: 'm1', splitAmong: ['m1'], date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /unknown expense/);
+  r = post({
+    action: 'updateExpense', id: 'e-upd', groupId: 'g1', description: 'x',
+    amountCents: 8000, paidBy: 'm1', splitAmong: ['m1'],
+    shares: { m1: 100 }, date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /add up/);
+});
+
+t('bootstrap adds venmo column to an existing members tab', () => {
+  sheets.members._rows.length = 0;
+  sheets.members._rows.push(['id', 'group_id', 'name']);
+  sheets.members._rows.push(['m-old', 'g1', 'Old Guy']);
+  global.__bootstrap();
+  const head = sheets.members.getDataRange().getValues()[0].map(String);
+  assert.ok(head.includes('venmo'), 'venmo column added');
+  const { res } = get('state');
+  const old = res.state.members.find((m) => m.id === 'm-old');
+  assert.strictEqual(old.name, 'Old Guy');
+});
+
+t('deleteExpense is a soft delete: row stays in the sheet, hidden from state', () => {
+  const before = sheets.expenses.getDataRange().getValues().length;
+  let r = post({ action: 'deleteExpense', id: 'e-upd' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.state.expenses.filter((e) => e.id === 'e-upd').length, 0);
+  assert.strictEqual(sheets.expenses.getDataRange().getValues().length, before, 'row not removed');
+  r = post({ action: 'deleteExpense', id: 'e-upd' }); // idempotent retry
+  assert.strictEqual(r.res.ok, true);
+  r = post({ action: 'deleteExpense', id: 'nope' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /not found/);
+});
+
+t('deleteSettlement is a soft delete', () => {
+  post({ action: 'addMember', id: 'm-s1', groupId: 'g1', name: 'Sam' });
+  post({ action: 'addMember', id: 'm-s2', groupId: 'g1', name: 'Tom' });
+  let r = post({
+    action: 'addSettlement', id: 's-del', groupId: 'g1', fromId: 'm-s1', toId: 'm-s2',
+    amountCents: 100, date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, true);
+  const before = sheets.settlements.getDataRange().getValues().length;
+  r = post({ action: 'deleteSettlement', id: 's-del' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(sheets.settlements.getDataRange().getValues().length, before, 'row not removed');
+  assert.strictEqual(r.res.state.settlements.filter((s) => s.id === 's-del').length, 0);
+});
+
+t('activity log records mutations, skips idempotent retries', () => {
+  const n0 = sheets.activity ? sheets.activity.getDataRange().getValues().length : 0;
+  let r = post({ action: 'createGroup', id: 'g-log', name: 'Log Group' });
+  assert.strictEqual(r.res.ok, true);
+  r = post({ action: 'addMember', id: 'm-log1', groupId: 'g-log', name: 'Zed' });
+  assert.strictEqual(r.res.ok, true);
+  r = post({ action: 'addMember', id: 'm-log1', groupId: 'g-log', name: 'Zed' }); // duplicate: not logged
+  assert.strictEqual(r.res.duplicate, true);
+  r = post({ action: 'deleteExpense', id: 'e-upd' }); // already deleted: not logged
+  assert.strictEqual(r.res.ok, true);
+  const rows = sheets.activity.getDataRange().getValues();
+  assert.strictEqual(rows.length, n0 + 2, 'only real mutations logged, got ' + rows.length);
+  const acts = rows.slice(1).map((row) => String(row[2]));
+  assert.ok(acts.includes('createGroup'), 'createGroup logged');
+  assert.ok(acts.includes('addMember'), 'addMember logged');
+  const addRow = rows.slice(1).find((row) => String(row[2]) === 'addMember' && String(row[1]) === 'g-log');
+  assert.ok(addRow, 'addMember row for g-log found');
+  assert.strictEqual(JSON.parse(addRow[4]).name, 'Zed', 'details recorded');
+});
+
+t('deleteGroup soft-deletes the group but keeps the row', () => {
+  const before = sheets.groups.getDataRange().getValues().length;
+  let r = post({ action: 'deleteGroup', id: 'g-log' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.state.groups.filter((g) => g.id === 'g-log').length, 0);
+  assert.strictEqual(sheets.groups.getDataRange().getValues().length, before, 'row not removed');
+  const raw = sheets.groups.getDataRange().getValues();
+  const row = raw.find((x) => String(x[0]) === 'g-log');
+  assert.strictEqual(String(row[3]), '1', 'deleted flag set');
+  r = post({ action: 'deleteGroup', id: 'g-log' }); // idempotent
+  assert.strictEqual(r.res.ok, true);
+  r = post({ action: 'deleteGroup', id: 'nope' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /unknown group/);
 });
 
 console.log(passed + ' gas tests passed');

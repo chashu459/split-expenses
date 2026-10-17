@@ -20,14 +20,29 @@
  *  GET  ?action=state
  *       -> { ok:true, state:{ groups, members, expenses, settlements } }
  *  POST { action:'createGroup', id?, name }                 -> { ok, group, state }
- *  POST { action:'addMember', id?, groupId, name }          -> { ok, member, state }
+ *  POST { action:'addMember', id?, groupId, name, venmo? } -> { ok, member, state }
+ *       venmo is an optional Venmo handle (stored without a leading "@").
+ *  POST { action:'addMembers', groupId, members:[{id?, name, venmo?}] }
+ *       -> { ok, members:[added], skipped, state }
+ *       Batch add. Members whose normalized name is already in the group are
+ *       skipped (counted in `skipped`), so the call is safe to retry.
  *  POST { action:'addExpense', id?, groupId, description, amountCents,
  *                          paidBy, splitAmong:[ids], shares?({id:cents}),
  *                          date }                           -> { ok, expense, state }
+ *  POST { action:'updateExpense', id, groupId, description, amountCents,
+ *                          paidBy, splitAmong:[ids], shares?({id:cents}),
+ *                          date }                           -> { ok, expense, state }
+ *       Edits an existing expense in place (receipt and created_at kept).
  *  POST { action:'addSettlement', id?, groupId, fromId, toId, amountCents, date }
  *       -> { ok, settlement, state }
  *  POST { action:'deleteExpense', id }                      -> { ok, state }
  *  POST { action:'deleteSettlement', id }                   -> { ok, state }
+ *  POST { action:'deleteGroup', id }                        -> { ok, state }
+ *       Deletes are SOFT: the row is flagged as deleted and hidden from
+ *       reads, but never removed from the sheet. Deleting twice is a no-op.
+ *
+ *  Every mutating POST also appends one row to the `activity` tab
+ *  (who-did-what audit log). Idempotent retries are not logged twice.
  *  POST { action:'uploadReceipt', expenseId, name?, mimeType?, data(base64) }
  *       -> { ok, receiptId, state }
  *
@@ -44,12 +59,15 @@
  */
 
 var TABS = {
-  groups:      ['id', 'name', 'created_at'],
-  members:     ['id', 'group_id', 'name'],
+  groups:      ['id', 'name', 'created_at', 'deleted'],
+  members:     ['id', 'group_id', 'name', 'venmo'],
   expenses:    ['id', 'group_id', 'description', 'amount_cents', 'paid_by',
-                'split_among', 'shares', 'receipt_id', 'date', 'created_at'],
+                'split_among', 'shares', 'receipt_id', 'date', 'created_at', 'deleted'],
   settlements: ['id', 'group_id', 'from_id', 'to_id', 'amount_cents',
-                'date', 'created_at'],
+                'date', 'created_at', 'deleted'],
+  // Append-only audit log. Every mutating action writes one row here
+  // (idempotent retries and no-op deletes are not logged twice).
+  activity:    ['id', 'group_id', 'action', 'target_id', 'details', 'created_at'],
 };
 
 /** Columns stored as JSON text in the sheet. */
@@ -100,15 +118,19 @@ function doPost(e) {
     switch (body.action) {
       case 'createGroup':      out = createGroup_(ss, db, body);      break;
       case 'addMember':        out = addMember_(ss, db, body);        break;
+      case 'addMembers':       out = addMembers_(ss, db, body);       break;
       case 'addExpense':       out = addExpense_(ss, db, body);       break;
+      case 'updateExpense':    out = updateExpense_(ss, db, body);    break;
       case 'addSettlement':    out = addSettlement_(ss, db, body);   break;
       case 'deleteExpense':    out = deleteExpense_(ss, db, body);    break;
       case 'deleteSettlement': out = deleteSettlement_(ss, db, body); break;
+      case 'deleteGroup':      out = deleteGroup_(ss, db, body);      break;
       case 'uploadReceipt':    out = uploadReceipt_(ss, db, body);    break;
       default: return json_({ ok: false, error: 'unknown action: ' + body.action });
     }
     out.ok = true;
     out.state = db; // db was updated in-memory by the action; lock was held throughout
+    if (!out.duplicate && !out.alreadyDeleted) logActivity_(ss, body, out);
     return json_(out);
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
@@ -206,15 +228,28 @@ function parseSettlement_(s) {
   return s;
 }
 
-/** Read every tab once; returns parsed rows in sheet (snake_case) shape. */
+/** Read every tab once; returns parsed rows in sheet (snake_case) shape.
+ *  Soft-deleted rows (deleted flag set) are hidden from clients but stay
+ *  in the sheet. */
 function readDb(ss) {
   ss = ss || SpreadsheetApp.getActiveSpreadsheet();
   return {
-    groups: rowsIn_(sheet_(ss, 'groups')),
+    groups: rowsIn_(sheet_(ss, 'groups')).filter(function (r) { return !isDeleted_(r); }),
     members: rowsIn_(sheet_(ss, 'members')),
-    expenses: rowsIn_(sheet_(ss, 'expenses')).map(parseExpense_),
-    settlements: rowsIn_(sheet_(ss, 'settlements')).map(parseSettlement_),
+    expenses: rowsIn_(sheet_(ss, 'expenses')).filter(function (r) { return !isDeleted_(r); }).map(parseExpense_),
+    settlements: rowsIn_(sheet_(ss, 'settlements')).filter(function (r) { return !isDeleted_(r); }).map(parseSettlement_),
   };
+}
+
+/** Soft-delete flag: rows are hidden, never removed from the sheet. */
+function isDeleted_(r) {
+  var v = r.deleted;
+  return v === 1 || v === true || v === '1' || v === 'true';
+}
+
+/** Raw (unfiltered) rows of a tab, for idempotent delete retries. */
+function rawRows_(ss, tab) {
+  return rowsIn_(sheet_(ss, tab));
 }
 
 function now_() { return new Date().toISOString(); }
@@ -274,6 +309,15 @@ function cleanName_(v, max) {
   return s;
 }
 
+/** Venmo handle: strip a leading "@", keep it to handle-safe characters. */
+function cleanVenmo_(v) {
+  if (v === undefined || v === null) return '';
+  var s = String(v).trim().replace(/^@+/, '');
+  if (!s) return '';
+  if (!/^[A-Za-z0-9._-]{1,30}$/.test(s)) throw new Error('bad venmo handle: ' + v);
+  return s;
+}
+
 /** Member names are normalized to title case so "jiashu wang" and
  *  "Jiashu Wang" are recognized as the same person everywhere. */
 function normalizeMemberName_(v) {
@@ -330,10 +374,44 @@ function addMember_(ss, db, body) {
            normalizeMemberName_(m.name) === name;
   });
   if (dupe) throw new Error('that name is already in this group');
-  var m = { id: id, group_id: String(body.groupId), name: name };
+  var m = { id: id, group_id: String(body.groupId), name: name, venmo: cleanVenmo_(body.venmo) };
   appendObj_(ss, 'members', m);
   db.members.push(m);
   return { member: m };
+}
+
+/** Batch add members. Skips names already in the group (counted in
+ *  `skipped`) instead of failing, so the call is safe to retry. */
+function addMembers_(ss, db, body) {
+  need_(body, ['groupId', 'members']);
+  getGroup_(db, body.groupId);
+  if (!Array.isArray(body.members) || !body.members.length) {
+    throw new Error('members must be a non-empty array');
+  }
+  if (body.members.length > 50) throw new Error('too many members at once (max 50)');
+  var seen = {};
+  db.members.forEach(function (m) {
+    if (String(m.group_id) === String(body.groupId)) {
+      seen[normalizeMemberName_(m.name)] = true;
+    }
+  });
+  var added = [], skipped = 0;
+  body.members.forEach(function (raw) {
+    var name = normalizeMemberName_(raw.name);
+    if (seen[name]) { skipped++; return; }
+    var id = id_(raw.id);
+    var existing = findById_(db.members, id);
+    if (existing) { skipped++; return; }
+    var m = {
+      id: id, group_id: String(body.groupId), name: name,
+      venmo: cleanVenmo_(raw.venmo),
+    };
+    appendObj_(ss, 'members', m);
+    db.members.push(m);
+    seen[name] = true;
+    added.push(m);
+  });
+  return { members: added, skipped: skipped };
 }
 
 function addExpense_(ss, db, body) {
@@ -368,6 +446,47 @@ function addExpense_(ss, db, body) {
   return { expense: ex };
 }
 
+/** Edit an expense in place. receipt_id and created_at are left untouched. */
+function updateExpense_(ss, db, body) {
+  need_(body, ['id', 'groupId', 'description', 'amountCents', 'paidBy', 'splitAmong', 'date']);
+  var ex = findById_(db.expenses, body.id);
+  if (!ex) throw new Error('unknown expense');
+  var cents = assertCents_(body.amountCents);
+  var splitAmong = body.splitAmong.map(String);
+  if (!splitAmong.length) throw new Error('splitAmong cannot be empty');
+  getGroup_(db, body.groupId);
+  checkMembers_(db, body.groupId, splitAmong.concat([body.paidBy]));
+  var shares = parseShares_(body.shares, db, body.groupId, cents);
+  var sheet = sheet_(ss, 'expenses');
+  var values = sheet.getDataRange().getValues();
+  var headers = values[0].map(String);
+  var row = -1;
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(body.id)) { row = r + 1; break; }
+  }
+  if (row === -1) throw new Error('unknown expense');
+  var updates = {
+    description: String(body.description).trim().slice(0, 120) || 'Expense',
+    amount_cents: cents,
+    paid_by: String(body.paidBy),
+    split_among: JSON.stringify(splitAmong),
+    shares: shares ? JSON.stringify(shares) : '',
+    date: dateStr_(body.date),
+  };
+  Object.keys(updates).forEach(function (h) {
+    var c = headers.indexOf(h);
+    if (c === -1) throw new Error('missing column "' + h + '" — run bootstrap()');
+    sheet.getRange(row, c + 1).setValue(updates[h]);
+  });
+  ex.description = updates.description;
+  ex.amount_cents = cents;
+  ex.paid_by = updates.paid_by;
+  ex.split_among = splitAmong;
+  ex.shares = shares;
+  ex.date = updates.date;
+  return { expense: ex };
+}
+
 function addSettlement_(ss, db, body) {
   need_(body, ['groupId', 'fromId', 'toId', 'amountCents', 'date']);
   var id = id_(body.id);
@@ -393,38 +512,116 @@ function addSettlement_(ss, db, body) {
   return { settlement: s };
 }
 
-function deleteExpense_(ss, db, body) {
-  if (!body.id) throw new Error('missing field: id');
-  var sheet = sheet_(ss, 'expenses');
-  var values = sheet.getDataRange().getValues();
-  var found = false;
-  for (var r = 1; r < values.length; r++) {
-    if (String(values[r][0]) === String(body.id)) {
-      sheet.deleteRow(r + 1);
-      found = true;
-      break;
-    }
+/** Soft delete: flag the row as deleted; it stays in the sheet but is
+ *  hidden from reads. Idempotent — deleting twice is a no-op. */
+function softDelete_(ss, db, tab, rows, id) {
+  if (!id) throw new Error('missing field: id');
+  var live = findById_(rows, id);
+  if (!live) {
+    var existed = rawRows_(ss, tab).some(function (r) { return String(r.id) === String(id); });
+    if (!existed) throw new Error('not found');
+    return { alreadyDeleted: true }; // idempotent no-op
   }
-  if (!found) throw new Error('not found');
+  setCellById_(ss, tab, id, 'deleted', '1');
+  return {};
+}
+
+function deleteExpense_(ss, db, body) {
+  var r = softDelete_(ss, db, 'expenses', db.expenses, body.id);
+  if (r && r.alreadyDeleted) return r;
   db.expenses = db.expenses.filter(function (x) { return String(x.id) !== String(body.id); });
   return {};
 }
 
 function deleteSettlement_(ss, db, body) {
-  if (!body.id) throw new Error('missing field: id');
-  var sheet = sheet_(ss, 'settlements');
-  var values = sheet.getDataRange().getValues();
-  var found = false;
-  for (var r = 1; r < values.length; r++) {
-    if (String(values[r][0]) === String(body.id)) {
-      sheet.deleteRow(r + 1);
-      found = true;
-      break;
-    }
-  }
-  if (!found) throw new Error('not found');
+  var r = softDelete_(ss, db, 'settlements', db.settlements, body.id);
+  if (r && r.alreadyDeleted) return r;
   db.settlements = db.settlements.filter(function (x) { return String(x.id) !== String(body.id); });
   return {};
+}
+
+/** Soft-delete a whole group (its row is flagged, never removed). */
+function deleteGroup_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var g = findById_(db.groups, body.id);
+  if (!g) {
+    var existed = rawRows_(ss, 'groups').some(function (r) { return String(r.id) === String(body.id); });
+    if (!existed) throw new Error('unknown group');
+    return { alreadyDeleted: true }; // idempotent no-op
+  }
+  setCellById_(ss, 'groups', body.id, 'deleted', '1');
+  db.groups = db.groups.filter(function (x) { return String(x.id) !== String(body.id); });
+  return {};
+}
+
+/* ---------------- activity log ---------------- */
+
+/** Make sure the activity tab exists with the right headers (self-healing,
+ *  so no manual bootstrap run is needed after upgrading). */
+function ensureActivityTab_(ss) {
+  var sheet = ss.getSheetByName('activity');
+  if (!sheet) {
+    sheet = ss.insertSheet('activity');
+    sheet.appendRow(TABS.activity);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+  var have = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+  TABS.activity.forEach(function (h) {
+    if (have.indexOf(h) === -1) {
+      sheet.getRange(1, have.length + 1).setValue(h);
+      have.push(h);
+    }
+  });
+  return sheet;
+}
+
+/** Append one audit row per mutating action. Called from doPost; idempotent
+ *  retries and no-op deletes are skipped by the caller. */
+function logActivity_(ss, body, out) {
+  ensureActivityTab_(ss);
+  var details = {};
+  switch (body.action) {
+    case 'createGroup':
+      details = { name: body.name };
+      break;
+    case 'addMember':
+      details = { name: body.name, venmo: body.venmo || '' };
+      break;
+    case 'addMembers':
+      details = {
+        added: (out.members || []).map(function (m) { return m.name; }),
+        skipped: out.skipped || 0,
+      };
+      break;
+    case 'addExpense':
+    case 'updateExpense':
+      details = {
+        description: body.description, amount_cents: body.amountCents,
+        paid_by: body.paidBy,
+      };
+      break;
+    case 'addSettlement':
+      details = {
+        from_id: body.fromId, to_id: body.toId, amount_cents: body.amountCents,
+      };
+      break;
+    case 'uploadReceipt':
+      details = { expense_id: body.expenseId, name: body.name || '' };
+      break;
+    // deleteExpense / deleteSettlement / deleteGroup: target id is enough
+  }
+  var target = body.id || body.expenseId ||
+    (out.group && out.group.id) || (out.member && out.member.id) ||
+    (out.expense && out.expense.id) || (out.settlement && out.settlement.id) || '';
+  appendObj_(ss, 'activity', {
+    id: uuid_(),
+    group_id: String(body.groupId || ''),
+    action: String(body.action),
+    target_id: String(target),
+    details: JSON.stringify(details),
+    created_at: now_(),
+  });
 }
 
 /* ---------------- receipts ---------------- */

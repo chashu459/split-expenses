@@ -260,6 +260,8 @@
       '<main class="wrap">' +
         (cards || '<p class="empty">No groups yet. Start one below.</p>') +
         '<button class="btn primary block" id="new-group">+ New group</button>' +
+        '<footer class="foot"><a href="privacy.html">Privacy</a> · ' +
+        '<a href="terms.html">Terms</a></footer>' +
       '</main>';
 
     $all('[data-group]').forEach(function (el) {
@@ -298,6 +300,7 @@
           '<button class="tab' + (tab === 'balances' ? ' active' : '') + '" data-tab="balances">Balances</button>' +
           '<button class="tab' + (tab === 'expenses' ? ' active' : '') + '" data-tab="expenses">Expenses</button>' +
         '</div>' + body +
+        '<button class="btn danger block" id="delete-group">Delete group</button>' +
       '</main>';
 
     $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
@@ -352,37 +355,88 @@
 
   // How the selected ("you are") user fares in one expense:
   // "You lent $X" / "You borrowed $X" / "Even" / "You're not involved".
-  function myExpenseLine(g, e) {
+  // Returns { net, involved } or null when no user is selected.
+  function myExpenseNet(g, e) {
     var me = myId(g.id);
-    if (!me) return '';
+    if (!me) return null;
     var owed = owedSplit(e);
     var myOwed = owed[String(me)] || 0;
     var paidByMe = String(e.paidBy) === String(me);
     var inSplit = e.splitAmong.map(String).indexOf(String(me)) !== -1;
-    if (!paidByMe && !inSplit && myOwed <= 0) {
-      return '<span class="myshare muted">You\'re not involved</span>';
-    }
-    var net = (paidByMe ? e.amountCents : 0) - myOwed;
-    if (net > 0) return '<span class="myshare pos">You lent ' + formatMoney(net) + '</span>';
-    if (net < 0) return '<span class="myshare neg">You borrowed ' + formatMoney(-net) + '</span>';
+    if (!paidByMe && !inSplit && myOwed <= 0) return { net: 0, involved: false };
+    return { net: (paidByMe ? e.amountCents : 0) - myOwed, involved: true };
+  }
+
+  function myExpenseLine(g, e) {
+    var r = myExpenseNet(g, e);
+    if (!r) return '';
+    if (!r.involved) return '<span class="myshare muted">You\'re not involved</span>';
+    if (r.net > 0) return '<span class="myshare pos">You lent ' + formatMoney(r.net) + '</span>';
+    if (r.net < 0) return '<span class="myshare neg">You borrowed ' + formatMoney(-r.net) + '</span>';
     return '<span class="myshare zero">Even</span>';
   }
 
-  function mySettlementLine(g, s) {
+  // Signed personal amount for the right-hand column: +$X lent, −$X borrowed.
+  // Falls back to the total (muted) when the user isn't involved or selected.
+  function myExpenseAmt(g, e) {
+    var r = myExpenseNet(g, e);
+    if (r && r.involved) {
+      if (r.net > 0) return '<span class="amt pos">+' + formatMoney(r.net) + '</span>';
+      if (r.net < 0) return '<span class="amt neg">−' + formatMoney(-r.net) + '</span>';
+      return '<span class="amt zero">' + formatMoney(0) + '</span>';
+    }
+    var cls = r ? ' zero' : '';
+    return '<span class="amt' + cls + '">' + formatMoney(e.amountCents) + '</span>';
+  }
+
+  // 'paid' | 'received' | 'uninvolved' | null (no user selected)
+  function mySettlementDir(g, s) {
     var me = myId(g.id);
-    if (!me) return '';
-    if (String(s.fromId) === String(me)) {
+    if (!me) return null;
+    if (String(s.fromId) === String(me)) return 'paid';
+    if (String(s.toId) === String(me)) return 'received';
+    return 'uninvolved';
+  }
+
+  function mySettlementLine(g, s) {
+    var d = mySettlementDir(g, s);
+    if (!d) return '';
+    if (d === 'paid') {
       return '<span class="myshare neg">You paid ' + formatMoney(s.amountCents) + '</span>';
     }
-    if (String(s.toId) === String(me)) {
+    if (d === 'received') {
       return '<span class="myshare pos">You received ' + formatMoney(s.amountCents) + '</span>';
     }
     return '<span class="myshare muted">You\'re not involved</span>';
   }
 
+  function mySettlementAmt(g, s) {
+    var d = mySettlementDir(g, s);
+    if (d === 'paid') return '<span class="amt neg">−' + formatMoney(s.amountCents) + '</span>';
+    if (d === 'received') return '<span class="amt pos">+' + formatMoney(s.amountCents) + '</span>';
+    var cls = d ? ' zero' : '';
+    return '<span class="amt' + cls + '">' + formatMoney(s.amountCents) + '</span>';
+  }
+
+  // "Today" / "Yesterday" / "Oct 16, 2026"
+  function dateHeaderLabel(d) {
+    var today = todayISO();
+    if (d === today) return 'Today';
+    var y = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (d === y) return 'Yesterday';
+    var p = String(d).split('-');
+    if (p.length !== 3) return d;
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var mi = Number(p[1]) - 1;
+    return (months[mi] || p[1]) + ' ' + Number(p[2]) + ', ' + p[0];
+  }
+
   function expensesTab(g, ms) {
-    var ex = expensesOf(g.id), st = settlementsOf(g.id);
-    var items = ex.map(function (e) {
+    // One interleaved feed: expenses + payments, grouped under date
+    // headers, newest first — ordered by date, then time created.
+    var feed = [];
+    expensesOf(g.id).forEach(function (e) {
       var who = e.splitAmong.map(function (id) { return esc(displayName(g.id, id)); }).join(', ');
       var splitNote = e.shares ? ' · custom split' : '';
       var payer = memberById(e.paidBy);
@@ -390,43 +444,70 @@
       var receipt = rurl
         ? ' <a class="receipt" href="' + rurl + '" target="_blank" rel="noopener" title="View receipt">🧾</a>'
         : (e.receiptId ? ' <span class="receipt" title="Receipt attached">🧾</span>' : '');
-      return '<div class="exp-row"><div class="exp-left">' + avatarHTML(payer, ms) +
-        '<div class="exp-main"><span class="exp-desc">' + esc(e.description) + receipt + '</span>' +
-        myExpenseLine(g, e) +
-        '<span class="exp-sub">' + formatMoney(e.amountCents) + ' total · ' + esc(fmtDate(e.date)) +
-        ' · ' + esc(displayName(g.id, e.paidBy)) + ' paid · split: ' + who + splitNote + '</span></div></div>' +
-        '<div class="exp-right"><span class="amt">' + formatMoney(e.amountCents) + '</span>' +
-        '<button class="del" data-del-exp="' + esc(e.id) + '" title="Delete">×</button></div>' +
-        '</div>';
-    }).join('');
-
-    var stItems = st.map(function (s) {
-      return '<div class="exp-row settle"><div class="exp-left">' +
-        '<div class="exp-main"><span class="exp-desc">💸 ' + esc(displayName(g.id, s.fromId)) +
-        ' → ' + esc(displayName(g.id, s.toId)) + '</span>' +
-        mySettlementLine(g, s) +
-        '<span class="exp-sub">' + formatMoney(s.amountCents) + ' · ' + esc(fmtDate(s.date)) +
-        ' · payment recorded</span></div></div>' +
-        '<div class="exp-right"><span class="amt">' + formatMoney(s.amountCents) + '</span>' +
-        '<button class="del" data-del-settle="' + esc(s.id) + '" title="Delete">×</button></div>' +
-        '</div>';
-    }).join('');
+      feed.push({
+        date: fmtDate(e.date), createdAt: e.createdAt || '', id: e.id,
+        html: '<div class="exp-row"><div class="exp-left">' + avatarHTML(payer, ms) +
+          '<div class="exp-main"><span class="exp-desc">' + esc(e.description) + receipt + '</span>' +
+          myExpenseLine(g, e) +
+          '<span class="exp-sub">' + formatMoney(e.amountCents) + ' total · ' +
+          esc(displayName(g.id, e.paidBy)) + ' paid · split: ' + who + splitNote + '</span></div></div>' +
+          '<div class="exp-right">' + myExpenseAmt(g, e) +
+          '<button class="edit-btn" data-edit-exp="' + esc(e.id) + '" title="Edit">✎</button></div>' +
+          '</div>',
+      });
+    });
+    settlementsOf(g.id).forEach(function (s) {
+      feed.push({
+        date: fmtDate(s.date), createdAt: s.createdAt || '', id: s.id,
+        html: '<div class="exp-row settle"><div class="exp-left">' +
+          '<div class="exp-main"><span class="exp-desc">💸 ' + esc(displayName(g.id, s.fromId)) +
+          ' → ' + esc(displayName(g.id, s.toId)) + '</span>' +
+          mySettlementLine(g, s) +
+          '<span class="exp-sub">' + formatMoney(s.amountCents) + ' · payment recorded</span></div></div>' +
+          '<div class="exp-right">' + mySettlementAmt(g, s) +
+          '<button class="del" data-del-settle="' + esc(s.id) + '" title="Delete">×</button></div>' +
+          '</div>',
+      });
+    });
+    feed.sort(function (a, b) {
+      return (b.date || '').localeCompare(a.date || '') ||
+             (b.createdAt || '').localeCompare(a.createdAt || '') ||
+             String(b.id).localeCompare(String(a.id));
+    });
+    var html = '', lastDate = null;
+    feed.forEach(function (item) {
+      if (item.date !== lastDate) {
+        html += '<div class="date-head">' + esc(dateHeaderLabel(item.date || 'Undated')) + '</div>';
+        lastDate = item.date;
+      }
+      html += item.html;
+    });
 
     return '<button class="btn primary block" id="add-expense">+ Add expense</button>' +
-      '<section>' + ((items + stItems) || '<p class="empty">No expenses yet.</p>') + '</section>';
+      '<section>' + (html || '<p class="empty">No expenses yet.</p>') + '</section>';
   }
 
   function wireGroupButtons(g, ms) {
     var b;
-    if ((b = $('#add-expense'))) b.addEventListener('click', function () { addExpenseModal(g, ms); });
+    if ((b = $('#add-expense'))) b.addEventListener('click', function () { expenseModal(g, ms, null); });
     if ((b = $('#settle'))) b.addEventListener('click', function () { settleModal(g, ms); });
-    $all('[data-del-exp]').forEach(function (el) {
+    if ((b = $('#delete-group'))) b.addEventListener('click', function () {
+      var open = simplifyDebts(computeBalances(ms, expensesOf(g.id), settlementsOf(g.id))).length;
+      var msg = open > 0
+        ? 'This group still has ' + open + ' unsettled payment' + (open === 1 ? '' : 's') +
+          '. Delete the group anyway? It will be hidden from the app but kept in the sheet.'
+        : 'Delete this group? It will be hidden from the app but kept in the sheet.';
+      if (!confirm(msg)) return;
+      view = { name: 'groups' };
+      mutate('Delete group',
+        function () { state.groups = state.groups.filter(function (x) { return x.id !== g.id; }); },
+        function () { return backend.deleteGroup(g.id); });
+    });
+    $all('[data-edit-exp]').forEach(function (el) {
       el.addEventListener('click', function () {
-        var id = el.getAttribute('data-del-exp');
-        if (!confirm('Delete this expense?')) return;
-        mutate('Delete expense',
-          function () { state.expenses = state.expenses.filter(function (e) { return e.id !== id; }); },
-          function () { return backend.deleteExpense(id); });
+        var id = el.getAttribute('data-edit-exp');
+        var ex = state.expenses.filter(function (e) { return e.id === id; })[0];
+        if (ex) expenseModal(g, ms, ex);
       });
     });
     $all('[data-del-settle]').forEach(function (el) {
@@ -453,26 +534,68 @@
       if (!name) { toast('Give the group a name', true); return; }
       var g = { id: uuid(), name: name };
       view = { name: 'group', id: g.id, tab: 'balances' };
+      // The creator joins the group automatically (when an identity is set).
+      var selfMember = myName
+        ? { id: uuid(), groupId: g.id, name: myName, venmo: '' }
+        : null;
       mutate('Create group',
-        function () { state.groups.push(g); },
-        function () { return backend.createGroup(g); });
+        function () {
+          state.groups.push(g);
+          if (selfMember) state.members.push(selfMember);
+        },
+        function () {
+          return backend.createGroup(g).then(function (out) {
+            if (!selfMember) return out;
+            return backend.addMember(selfMember);
+          });
+        });
       addMemberModal({ id: g.id, name: g.name });
     });
   }
 
+  // Parse batch member input: one per line, optional trailing @venmo handle.
+  // "Alex" -> {name:'Alex', venmo:''}; "Priya @priya-pays" -> {name:'Priya', venmo:'priya-pays'}.
+  // Returns { members, bad } where bad lists lines with an invalid handle.
+  function parseMemberLines(text) {
+    var members = [], bad = [];
+    String(text == null ? '' : text).split('\n').forEach(function (line) {
+      var t = line.trim();
+      if (!t) return;
+      var at = t.lastIndexOf('@');
+      if (at === -1) {
+        members.push({ name: normalizeName(t), venmo: '' });
+        return;
+      }
+      var namePart = t.slice(0, at).trim();
+      var handle = t.slice(at + 1).trim();
+      if (!namePart || !/^[A-Za-z0-9._-]{1,30}$/.test(handle)) {
+        bad.push(t);
+        return;
+      }
+      members.push({ name: normalizeName(namePart), venmo: handle });
+    });
+    return { members: members, bad: bad };
+  }
+
   function addMemberModal(g) {
-    openModal('<h2>Add person</h2>' +
-      '<label>Name<input id="f-name" placeholder="e.g. Alex" maxlength="40"></label>' +
+    openModal('<h2>Add people</h2>' +
+      '<label>One per line — add <b>@venmo</b> after a name to set their Venmo handle' +
+      '<textarea id="f-names" rows="4" placeholder="Alex\nPriya @priya-pays"></textarea></label>' +
       '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
       '<button class="btn primary" id="m-ok">Add</button></div>');
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
-      var name = normalizeName($('#f-name').value);
-      if (!name) { toast('Enter a name', true); return; }
-      var m = { id: uuid(), groupId: g.id, name: name };
-      mutate('Add person',
-        function () { state.members.push(m); },
-        function () { return backend.addMember(m); });
+      var parsed = parseMemberLines($('#f-names').value);
+      if (parsed.bad.length) { toast('Bad Venmo handle: ' + parsed.bad.join(', '), true); return; }
+      if (!parsed.members.length) { toast('Enter at least one name', true); return; }
+      var members = parsed.members.map(function (p) {
+        return { id: uuid(), groupId: g.id, name: p.name, venmo: p.venmo };
+      });
+      mutate('Add people',
+        function () {
+          members.forEach(function (m) { state.members.push(m); });
+        },
+        function () { return backend.addMembers(g.id, members); });
     });
   }
 
@@ -507,46 +630,77 @@
     });
   }
 
-  function addExpenseModal(g, ms) {
+  // Shared add/edit expense form. `existing` is null for a new expense;
+  // when set, the form is prefilled, saving updates in place, and a Delete
+  // button appears (receipts are left untouched on edit).
+  function expenseModal(g, ms, existing) {
     if (ms.length < 1) { toast('Add people to the group first', true); return; }
     var me = myId(g.id);
-    var splitMode = 'equal';
+    var isEdit = !!existing;
+    var splitMode = (existing && existing.shares) ? 'custom' : 'equal';
     var receiptFile = null;
-    var customDirty = false; // true once the user edits a custom amount by hand
+    // In edit mode start dirty so saved custom amounts are never auto-overwritten.
+    var customDirty = isEdit;
 
     var paidOpts = ms.map(function (m) {
-      return '<option value="' + esc(m.id) + '"' + (m.id === me ? ' selected' : '') + '>' +
+      var sel = existing ? String(existing.paidBy) === String(m.id) : m.id === me;
+      return '<option value="' + esc(m.id) + '"' + (sel ? ' selected' : '') + '>' +
         esc(m.name) + '</option>';
     }).join('');
+    function inEqual(id) {
+      return existing
+        ? existing.splitAmong.map(String).indexOf(String(id)) !== -1
+        : true;
+    }
     var equalChecks = ms.map(function (m) {
       return '<label class="check">' + avatarHTML(m, ms) +
-        '<input type="checkbox" data-split="' + esc(m.id) + '" checked> ' +
-        esc(m.name) + '</label>';
+        '<input type="checkbox" data-split="' + esc(m.id) + '"' +
+        (inEqual(m.id) ? ' checked' : '') + '> ' + esc(m.name) + '</label>';
     }).join('');
+    function inCustom(id) {
+      return existing
+        ? !!(existing.shares && existing.shares[String(id)] !== undefined)
+        : true;
+    }
+    function customAmt(id) {
+      if (existing && existing.shares && existing.shares[String(id)] !== undefined) {
+        return ' value="' + (Number(existing.shares[String(id)]) / 100).toFixed(2) + '"';
+      }
+      return '';
+    }
     var customRows = ms.map(function (m) {
       return '<div class="crow"><label class="check">' + avatarHTML(m, ms) +
-        '<input type="checkbox" data-csplit="' + esc(m.id) + '" checked></label>' +
+        '<input type="checkbox" data-csplit="' + esc(m.id) + '"' +
+        (inCustom(m.id) ? ' checked' : '') + '></label>' +
         '<span class="crow-name">' + esc(m.name) + '</span>' +
-        '<input class="crow-amt" data-camt="' + esc(m.id) + '" inputmode="decimal" placeholder="0.00"></div>';
+        '<input class="crow-amt" data-camt="' + esc(m.id) + '" inputmode="decimal" placeholder="0.00"' +
+        customAmt(m.id) + '></div>';
     }).join('');
 
-    openModal('<h2>Add expense</h2>' +
-      '<label>Description<input id="f-desc" placeholder="e.g. Dinner" maxlength="120"></label>' +
+    openModal('<h2>' + (isEdit ? 'Edit expense' : 'Add expense') + '</h2>' +
+      '<label>Description<input id="f-desc" placeholder="e.g. Dinner" maxlength="120"' +
+      (existing ? ' value="' + esc(existing.description) + '"' : '') + '></label>' +
       '<div class="row2">' +
-      '<label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"></label>' +
-      '<label>Date<input id="f-date" type="date" value="' + todayISO() + '"></label>' +
+      '<label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"' +
+      (existing ? ' value="' + (Number(existing.amountCents) / 100).toFixed(2) + '"' : '') + '></label>' +
+      '<label>Date<input id="f-date" type="date" value="' +
+      (existing ? esc(fmtDate(existing.date)) : todayISO()) + '"></label>' +
       '</div>' +
       '<label>Paid by<select id="f-paid">' + paidOpts + '</select></label>' +
-      '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>' +
+      (isEdit ? '' : '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>') +
       '<div class="seg" id="split-mode">' +
-        '<button data-mode="equal" class="active">Equal split</button>' +
-        '<button data-mode="custom">Custom amounts</button>' +
+        '<button data-mode="equal"' + (splitMode === 'equal' ? ' class="active"' : '') + '>Equal split</button>' +
+        '<button data-mode="custom"' + (splitMode === 'custom' ? ' class="active"' : '') + '>Custom amounts</button>' +
       '</div>' +
-      '<div id="split-equal"><div class="checks">' + equalChecks + '</div></div>' +
-      '<div id="split-custom" class="hidden">' + customRows + '</div>' +
+      '<div id="split-equal"' + (splitMode === 'equal' ? '' : ' class="hidden"') +
+      '><div class="checks">' + equalChecks + '</div></div>' +
+      '<div id="split-custom"' + (splitMode === 'custom' ? '' : ' class="hidden"') +
+      '>' + customRows + '</div>' +
       '<div id="split-preview" class="preview"></div>' +
-      '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
-      '<button class="btn primary" id="m-ok">Add</button></div>');
+      '<div class="modal-actions">' +
+      (isEdit ? '<button class="btn danger" id="m-del">Delete</button>' : '') +
+      '<button class="btn" id="m-cancel">Cancel</button>' +
+      '<button class="btn primary" id="m-ok">' + (isEdit ? 'Save' : 'Add') + '</button></div>');
 
     function checkedEqualIds() {
       return $all('#split-equal [data-split]').filter(function (c) { return c.checked; })
@@ -578,7 +732,9 @@
     }
     function renderPreview() {
       var box = $('#split-preview');
-      var cents = dollarsToCents($('#f-amount').value);
+      var amtEl = $('#f-amount');
+      if (!box || !amtEl) return; // modal closed: stale event, ignore
+      var cents = dollarsToCents(amtEl.value);
       if (!cents) {
         box.innerHTML = '<span class="muted">Enter an amount to preview the split.</span>';
         return;
@@ -651,17 +807,32 @@
       if (splitMode === 'custom' && !customDirty) prefillCustom();
       renderPreview();
     });
-    $('#overlay').addEventListener('change', renderPreview);
-    $('#overlay').addEventListener('input', function (ev) {
+    // Live preview listeners go on the fresh .modal element (removed on
+    // close), never on the persistent #overlay, so they can't accumulate
+    // across opens and fire after the modal is gone.
+    var modalEl = $('#overlay .modal');
+    modalEl.addEventListener('change', renderPreview);
+    modalEl.addEventListener('input', function (ev) {
       if (ev.target.hasAttribute('data-camt')) customDirty = true;
       if (ev.target.id === 'f-amount' || ev.target.hasAttribute('data-camt')) renderPreview();
     });
-    $('#f-receipt').addEventListener('change', function (ev) {
+    var fr = $('#f-receipt');
+    if (fr) fr.addEventListener('change', function (ev) {
       receiptFile = (ev.target.files && ev.target.files[0]) || null;
     });
     renderPreview();
 
     $('#m-cancel').addEventListener('click', closeModal);
+    if (isEdit) {
+      $('#m-del').addEventListener('click', function () {
+        if (!confirm('Delete this expense?')) return;
+        mutate('Delete expense',
+          function () {
+            state.expenses = state.expenses.filter(function (e) { return e.id !== existing.id; });
+          },
+          function () { return backend.deleteExpense(existing.id); });
+      });
+    }
     $('#m-ok').addEventListener('click', function () {
       var cents = dollarsToCents($('#f-amount').value);
       if (cents === null) { toast('Enter a valid amount', true); return; }
@@ -684,6 +855,27 @@
         shares = cs2.shares;
         split = sids2; // members without an amount are left out of the split
       }
+      view.tab = 'expenses';
+      if (isEdit) {
+        var updated = {
+          id: existing.id, groupId: g.id,
+          description: $('#f-desc').value.trim() || 'Expense',
+          amountCents: cents,
+          paidBy: $('#f-paid').value,
+          splitAmong: split,
+          shares: shares,
+          receiptId: existing.receiptId,
+          date: $('#f-date').value || todayISO(),
+        };
+        mutate('Save expense',
+          function () {
+            for (var i = 0; i < state.expenses.length; i++) {
+              if (state.expenses[i].id === existing.id) { state.expenses[i] = updated; break; }
+            }
+          },
+          function () { return backend.updateExpense(updated); });
+        return;
+      }
       var ex = {
         id: uuid(), groupId: g.id,
         description: $('#f-desc').value.trim() || 'Expense',
@@ -695,7 +887,6 @@
         date: $('#f-date').value || todayISO(),
       };
       var file = receiptFile;
-      view.tab = 'expenses';
       mutate('Add expense',
         function () { state.expenses.push(ex); },
         function () {
@@ -727,9 +918,8 @@
     var sugList = simplified.map(function (p, i) {
       return '<button class="sug-row" data-sug="' + i + '">' +
         '<span class="sug-left">' + avatarHTML(memberById(p.from), ms) +
-        '<b>' + esc(displayName(g.id, p.from)) + '</b><span class="pays-word">→</span><b>' +
-        esc(displayName(g.id, p.to)) + '</b>' +
-        avatarHTML(memberById(p.to), ms) + '</span>' +
+        '<b>' + esc(displayName(g.id, p.from)) + '</b><span class="pays-word">→</span>' +
+        avatarHTML(memberById(p.to), ms) + '<b>' + esc(displayName(g.id, p.to)) + '</b></span>' +
         '<span class="amt">' + formatMoney(p.amountCents) + '</span></button>';
     }).join('');
 
@@ -741,8 +931,27 @@
       '<label>To<select id="f-to">' + personOpts() + '</select></label></div>' +
       '<div class="row2"><label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"></label>' +
       '<label>Date<input id="f-date" type="date" value="' + todayISO() + '"></label></div>' +
+      '<div id="venmo-wrap"></div>' +
       '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
       '<button class="btn primary" id="m-ok">Record</button></div>');
+
+    // Prefilled Venmo payment link, shown only when the recipient ("To")
+    // has a Venmo handle configured. Built at click time from the form.
+    function refreshVenmo() {
+      var wrap = $('#venmo-wrap');
+      if (!wrap) return;
+      var to = memberById($('#f-to').value);
+      if (!to || !to.venmo) { wrap.innerHTML = ''; return; }
+      var cents = dollarsToCents($('#f-amount').value);
+      var q = '?txn=pay&recipients=' + encodeURIComponent(to.venmo);
+      if (cents !== null) q += '&amount=' + (cents / 100).toFixed(2);
+      q += '&note=' + encodeURIComponent('Split It: ' + g.name);
+      wrap.innerHTML = '<a class="btn venmo block" href="https://venmo.com/' + q +
+        '" target="_blank" rel="noopener">Pay @' + esc(to.venmo) + ' with Venmo ↗</a>';
+    }
+    $('#f-to').addEventListener('change', refreshVenmo);
+    $('#f-amount').addEventListener('input', refreshVenmo);
+    refreshVenmo();
 
     $('#m-cancel').addEventListener('click', closeModal);
     $all('[data-sug]').forEach(function (el) {
@@ -751,6 +960,7 @@
         $('#f-from').value = p.from;
         $('#f-to').value = p.to;
         $('#f-amount').value = (p.amountCents / 100).toFixed(2);
+        refreshVenmo();
       });
     });
     $('#m-ok').addEventListener('click', function () {
