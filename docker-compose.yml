@@ -1,0 +1,21 @@
+services:
+  splitwise:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: splitwise
+    ports:
+      # host:container — change the left side if the port is taken on your NAS.
+      - "8090:80"
+    environment:
+      # Paste your Google Apps Script Web App URL here.
+      # Leave empty for demo mode (data stays in each visitor's browser).
+      API_URL: ""
+    networks:
+      # Same external network Caddy is on, so Caddy can reach this by name.
+      - proxy
+    restart: unless-stopped
+
+networks:
+  proxy:
+    external: true
