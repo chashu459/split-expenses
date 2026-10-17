@@ -260,8 +260,6 @@
       '<main class="wrap">' +
         (cards || '<p class="empty">No groups yet. Start one below.</p>') +
         '<button class="btn primary block" id="new-group">+ New group</button>' +
-        '<footer class="foot"><a href="privacy.html">Privacy</a> · ' +
-        '<a href="terms.html">Terms</a></footer>' +
       '</main>';
 
     $all('[data-group]').forEach(function (el) {

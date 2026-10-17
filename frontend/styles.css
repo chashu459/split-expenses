@@ -243,7 +243,3 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 /* receipt link */
 .receipt { text-decoration: none; margin-left: 4px; }
 a.receipt { cursor: pointer; }
-
-/* footer */
-.foot { text-align: center; margin: 26px 0 10px; font-size: 13px; color: var(--muted); }
-.foot a { color: var(--muted); }
