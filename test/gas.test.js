@@ -207,6 +207,19 @@ t('doGet state shape', () => {
   assert.strictEqual(bad.res.ok, false);
 });
 
+t('member names are normalized to title case', () => {
+  const { res } = post({ action: 'addMember', id: 'm-norm', groupId: 'g1', name: '  jiashu   wang ' });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.member.name, 'Jiashu Wang');
+  assert.strictEqual(res.state.members.find((m) => m.id === 'm-norm').name, 'Jiashu Wang');
+});
+
+t('duplicate member check is normalization-aware', () => {
+  const { res } = post({ action: 'addMember', id: 'm-norm2', groupId: 'g1', name: 'JIASHU WANG' });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /already in this group/);
+});
+
 t('uneven shares: balances follow shares, not equal split', () => {
   const B = require('../frontend/balances.js');
   const { res } = post({

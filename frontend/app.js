@@ -8,12 +8,22 @@
 
   var state = { groups: [], members: [], expenses: [], settlements: [] };
   var view = { name: 'groups' }; // or { name:'group', id, tab:'balances'|'expenses' }
-  var meByGroup = {}; // groupId -> memberId ("you are")
+  // Global identity: one normalized name ("Jiashu Wang"). A member with the
+  // same name in any group is recognized as the same person.
+  var myName = null;
 
   /* ---------- helpers ---------- */
 
   function $(sel, el) { return (el || document).querySelector(sel); }
   function $all(sel, el) { return Array.prototype.slice.call((el || document).querySelectorAll(sel)); }
+
+  // "jiashu wang" -> "Jiashu Wang". Mirrors the server's normalizeMemberName_.
+  function normalizeName(v) {
+    var parts = String(v == null ? '' : v).trim().split(/\s+/).filter(Boolean);
+    return parts.map(function (w) {
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(' ');
+  }
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -24,6 +34,19 @@
   function dollarsToCents(str) {
     var n = Math.round(parseFloat(String(str).trim()) * 100);
     return (isFinite(n) && n > 0) ? n : null;
+  }
+
+  // Parse one custom-split amount box.
+  // -> {state:'empty'} for blank or zero (counts as 0, excluded from the split),
+  //    {state:'ok', cents} for a positive amount,
+  //    {state:'bad'} for garbage/negative input.
+  function parseShareInput(raw) {
+    var t = String(raw == null ? '' : raw).trim();
+    if (t === '') return { state: 'empty' };
+    var n = Math.round(parseFloat(t) * 100);
+    if (!isFinite(n) || n < 0) return { state: 'bad' };
+    if (n === 0) return { state: 'empty' };
+    return { state: 'ok', cents: n };
   }
 
   function fmtDate(d) { return String(d || '').slice(0, 10); } // date only, never datetime
@@ -51,14 +74,14 @@
         .then(requestFn)
         .then(function (out) {
           pendingOps--;
-          state = out.state;
+          setState(out.state);
           renderPage();
         })
         .catch(function (err) {
           pendingOps--;
           toast(label + ' failed (' + (err && err.message || err) + ') — reloading.', true);
           return backend.getState().then(function (s) {
-            state = s;
+            setState(s);
             renderPage();
           }).catch(function () { renderPage(); });
         });
@@ -98,9 +121,10 @@
 
   function avatarHTML(member, members) {
     if (!member) return '';
-    var color = AVATAR_COLORS[hashStr(String(member.id)) % AVATAR_COLORS.length];
+    // Color by normalized name: the same person gets the same color everywhere.
+    var color = AVATAR_COLORS[hashStr(normalizeName(member.name)) % AVATAR_COLORS.length];
     return '<span class="avatar" style="background:' + color + '" title="' +
-      esc(member.name) + '">' + esc(avatarLabel(member, members)) + '</span>';
+      esc(normalizeName(member.name)) + '">' + esc(avatarLabel(member, members)) + '</span>';
   }
 
   function receiptURL(e) {
@@ -126,20 +150,52 @@
   }
   function memberName(id) {
     var m = memberById(id);
-    return m ? m.name : '?';
+    return m ? normalizeName(m.name) : '?';
   }
-  function myId(groupId) { return meByGroup[groupId] || null; }
+  // My member id within a group: the member whose normalized name matches
+  // the global identity (null when not found).
+  function myId(groupId) {
+    if (!myName) return null;
+    var ms = membersOf(groupId);
+    for (var i = 0; i < ms.length; i++) {
+      if (normalizeName(ms[i].name) === myName) return ms[i].id;
+    }
+    return null;
+  }
   function displayName(groupId, id) {
     return id === myId(groupId) ? 'You' : memberName(id);
   }
 
+  // Normalize member names on every state load so legacy rows and other
+  // clients' data match the same-person identity.
+  function setState(s) {
+    (s.members || []).forEach(function (m) { m.name = normalizeName(m.name); });
+    state = s;
+  }
+
   function loadMe() {
     try {
-      meByGroup = JSON.parse(localStorage.getItem('splitwise-me') || '{}');
-    } catch (_) { meByGroup = {}; }
+      myName = localStorage.getItem('splitwise-me-name') || null;
+    } catch (_) { myName = null; }
   }
   function saveMe() {
-    try { localStorage.setItem('splitwise-me', JSON.stringify(meByGroup)); } catch (_) {}
+    try {
+      if (myName) localStorage.setItem('splitwise-me-name', myName);
+      else localStorage.removeItem('splitwise-me-name');
+    } catch (_) {}
+  }
+  // One-time migration from the old per-group map {groupId: memberId}.
+  function migrateLegacyMe() {
+    if (myName) return;
+    try {
+      var old = JSON.parse(localStorage.getItem('splitwise-me') || '{}');
+      var ids = Object.keys(old);
+      for (var i = 0; i < ids.length; i++) {
+        var m = memberById(old[ids[i]]);
+        if (m) { myName = normalizeName(m.name); saveMe(); break; }
+      }
+      localStorage.removeItem('splitwise-me');
+    } catch (_) {}
   }
 
   function toast(msg, isErr) {
@@ -225,7 +281,7 @@
       '<select id="me-select"><option value="">—</option>' +
       ms.map(function (m) {
         return '<option value="' + esc(m.id) + '"' +
-          (myId(g.id) === m.id ? ' selected' : '') + '>' + esc(m.name) + '</option>';
+          (myId(g.id) === m.id ? ' selected' : '') + '>' + esc(normalizeName(m.name)) + '</option>';
       }).join('') + '</select></label>';
 
     var body = tab === 'balances' ? balancesTab(g, ms) : expensesTab(g, ms);
@@ -247,7 +303,8 @@
     $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
     $('#add-member').addEventListener('click', function () { addMemberModal(g); });
     $('#me-select').addEventListener('change', function (ev) {
-      meByGroup[g.id] = ev.target.value || null;
+      var m = memberById(ev.target.value);
+      myName = m ? normalizeName(m.name) : null;
       saveMe();
       render();
     });
@@ -273,15 +330,16 @@
       var text = b > 0 ? 'is owed ' + formatMoney(b)
                : b < 0 ? 'owes ' + formatMoney(-b)
                : 'settled up';
-      return '<div class="bal-row">' + avatarHTML(m, ms) + '<span>' + label + '</span>' +
+      return '<div class="bal-row"><div class="bal-left">' + avatarHTML(m, ms) +
+        '<span>' + label + '</span></div>' +
         '<span class="' + cls + '">' + text + '</span></div>';
     }).join('');
 
     var pays = simplified.map(function (p) {
       var from = memberById(p.from), to = memberById(p.to);
-      return '<div class="pay-row"><span>' + avatarHTML(from, ms) +
-        '<b>' + esc(displayName(g.id, p.from)) + '</b> pays <b>' +
-        esc(displayName(g.id, p.to)) + '</b>' + avatarHTML(to, ms) + '</span>' +
+      return '<div class="pay-row"><div class="pay-left">' + avatarHTML(from, ms) +
+        '<b>' + esc(displayName(g.id, p.from)) + '</b><span class="pays-word">pays</span><b>' +
+        esc(displayName(g.id, p.to)) + '</b>' + avatarHTML(to, ms) + '</div>' +
         '<span class="amt">' + formatMoney(p.amountCents) + '</span></div>';
     }).join('');
 
@@ -290,6 +348,36 @@
       (pays || '<p class="empty">Everyone is settled up 🎉</p>') +
       (ms.length >= 2 ? '<button class="btn primary block" id="settle">Record a payment</button>' : '') +
       '</section>';
+  }
+
+  // How the selected ("you are") user fares in one expense:
+  // "You lent $X" / "You borrowed $X" / "Even" / "You're not involved".
+  function myExpenseLine(g, e) {
+    var me = myId(g.id);
+    if (!me) return '';
+    var owed = owedSplit(e);
+    var myOwed = owed[String(me)] || 0;
+    var paidByMe = String(e.paidBy) === String(me);
+    var inSplit = e.splitAmong.map(String).indexOf(String(me)) !== -1;
+    if (!paidByMe && !inSplit && myOwed <= 0) {
+      return '<span class="myshare muted">You\'re not involved</span>';
+    }
+    var net = (paidByMe ? e.amountCents : 0) - myOwed;
+    if (net > 0) return '<span class="myshare pos">You lent ' + formatMoney(net) + '</span>';
+    if (net < 0) return '<span class="myshare neg">You borrowed ' + formatMoney(-net) + '</span>';
+    return '<span class="myshare zero">Even</span>';
+  }
+
+  function mySettlementLine(g, s) {
+    var me = myId(g.id);
+    if (!me) return '';
+    if (String(s.fromId) === String(me)) {
+      return '<span class="myshare neg">You paid ' + formatMoney(s.amountCents) + '</span>';
+    }
+    if (String(s.toId) === String(me)) {
+      return '<span class="myshare pos">You received ' + formatMoney(s.amountCents) + '</span>';
+    }
+    return '<span class="myshare muted">You\'re not involved</span>';
   }
 
   function expensesTab(g, ms) {
@@ -302,20 +390,23 @@
       var receipt = rurl
         ? ' <a class="receipt" href="' + rurl + '" target="_blank" rel="noopener" title="View receipt">🧾</a>'
         : (e.receiptId ? ' <span class="receipt" title="Receipt attached">🧾</span>' : '');
-      return '<div class="exp-row">' + avatarHTML(payer, ms) +
+      return '<div class="exp-row"><div class="exp-left">' + avatarHTML(payer, ms) +
         '<div class="exp-main"><span class="exp-desc">' + esc(e.description) + receipt + '</span>' +
-        '<span class="exp-sub">' + esc(fmtDate(e.date)) + ' · ' + esc(displayName(g.id, e.paidBy)) +
-        ' paid · split: ' + who + splitNote + '</span></div>' +
+        myExpenseLine(g, e) +
+        '<span class="exp-sub">' + formatMoney(e.amountCents) + ' total · ' + esc(fmtDate(e.date)) +
+        ' · ' + esc(displayName(g.id, e.paidBy)) + ' paid · split: ' + who + splitNote + '</span></div></div>' +
         '<div class="exp-right"><span class="amt">' + formatMoney(e.amountCents) + '</span>' +
         '<button class="del" data-del-exp="' + esc(e.id) + '" title="Delete">×</button></div>' +
         '</div>';
     }).join('');
 
     var stItems = st.map(function (s) {
-      return '<div class="exp-row settle">' +
+      return '<div class="exp-row settle"><div class="exp-left">' +
         '<div class="exp-main"><span class="exp-desc">💸 ' + esc(displayName(g.id, s.fromId)) +
         ' → ' + esc(displayName(g.id, s.toId)) + '</span>' +
-        '<span class="exp-sub">' + esc(fmtDate(s.date)) + ' · payment recorded</span></div>' +
+        mySettlementLine(g, s) +
+        '<span class="exp-sub">' + formatMoney(s.amountCents) + ' · ' + esc(fmtDate(s.date)) +
+        ' · payment recorded</span></div></div>' +
         '<div class="exp-right"><span class="amt">' + formatMoney(s.amountCents) + '</span>' +
         '<button class="del" data-del-settle="' + esc(s.id) + '" title="Delete">×</button></div>' +
         '</div>';
@@ -376,7 +467,7 @@
       '<button class="btn primary" id="m-ok">Add</button></div>');
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
-      var name = $('#f-name').value.trim();
+      var name = normalizeName($('#f-name').value);
       if (!name) { toast('Enter a name', true); return; }
       var m = { id: uuid(), groupId: g.id, name: name };
       mutate('Add person',
@@ -421,6 +512,7 @@
     var me = myId(g.id);
     var splitMode = 'equal';
     var receiptFile = null;
+    var customDirty = false; // true once the user edits a custom amount by hand
 
     var paidOpts = ms.map(function (m) {
       return '<option value="' + esc(m.id) + '"' + (m.id === me ? ' selected' : '') + '>' +
@@ -460,17 +552,21 @@
       return $all('#split-equal [data-split]').filter(function (c) { return c.checked; })
         .map(function (c) { return c.getAttribute('data-split'); });
     }
-    function customShares() {
-      // {id: cents} for checked rows, or null when any amount is invalid
-      var out = {}, ok = true;
+    function customState() {
+      // { bad, shares: {id: cents}, checked: [ids] }.
+      // Rows with blank/zero amounts count as 0 and are left out of shares;
+      // only garbage input sets bad.
+      var shares = {}, checked = [], bad = false;
       $all('#split-custom .crow').forEach(function (row) {
         var cb = row.querySelector('[data-csplit]');
         if (!cb.checked) return;
-        var cents = dollarsToCents(row.querySelector('[data-camt]').value);
-        if (cents === null) { ok = false; return; }
-        out[cb.getAttribute('data-csplit')] = cents;
+        var id = cb.getAttribute('data-csplit');
+        checked.push(id);
+        var p = parseShareInput(row.querySelector('[data-camt]').value);
+        if (p.state === 'bad') { bad = true; return; }
+        if (p.state === 'ok') shares[id] = p.cents;
       });
-      return ok ? out : null;
+      return { bad: bad, shares: shares, checked: checked };
     }
     function previewRows(parts, ids) {
       return ids.map(function (id) {
@@ -496,25 +592,34 @@
         var parts = owedSplit({ amountCents: cents, splitAmong: ids, shares: null });
         box.innerHTML = '<div class="pv-title">Split preview</div>' + previewRows(parts, ids);
       } else {
-        var shares = customShares();
-        if (shares === null) {
-          box.innerHTML = '<span class="muted">Enter each person\'s share.</span>';
+        var cs = customState();
+        if (cs.bad) {
+          box.innerHTML = '<span class="muted">One of the amounts isn\'t a valid number.</span>';
           return;
         }
-        var sids = Object.keys(shares);
-        if (!sids.length) {
+        if (!cs.checked.length) {
           box.innerHTML = '<span class="muted">Pick who to split with.</span>';
           return;
         }
-        var sum = sids.reduce(function (n, id) { return n + shares[id]; }, 0);
+        // Always show the running split: blank amounts count as $0.00.
+        var sids = Object.keys(cs.shares);
+        var sum = sids.reduce(function (n, id) { return n + cs.shares[id]; }, 0);
         var diff = cents - sum;
-        var note = diff === 0
-          ? '<div class="pv-total ok">✓ Adds up to ' + formatMoney(cents) + '</div>'
-          : '<div class="pv-total bad">' + (diff > 0
-              ? formatMoney(diff) + ' left to allocate'
-              : 'Over by ' + formatMoney(-diff)) + '</div>';
-        box.innerHTML = '<div class="pv-title">Split preview</div>' +
-          previewRows(shares, sids) + note;
+        var rowsHtml = cs.checked.map(function (id) {
+          var m = memberById(id);
+          return '<div class="pv-row">' + avatarHTML(m, ms) +
+            '<span>' + esc(m ? m.name : '?') + '</span>' +
+            '<span class="amt">' + formatMoney(cs.shares[id] || 0) + '</span></div>';
+        }).join('');
+        var note;
+        if (diff === 0 && sids.length) {
+          note = '<div class="pv-total ok">✓ Adds up to ' + formatMoney(cents) + '</div>';
+        } else if (diff > 0) {
+          note = '<div class="pv-total bad">' + formatMoney(diff) + ' left to allocate</div>';
+        } else {
+          note = '<div class="pv-total bad">Over by ' + formatMoney(-diff) + '</div>';
+        }
+        box.innerHTML = '<div class="pv-title">Split preview</div>' + rowsHtml + note;
       }
     }
 
@@ -539,15 +644,16 @@
       });
       $('#split-equal').classList.toggle('hidden', splitMode !== 'equal');
       $('#split-custom').classList.toggle('hidden', splitMode !== 'custom');
-      if (splitMode === 'custom') prefillCustom();
+      if (splitMode === 'custom') { prefillCustom(); customDirty = false; }
       renderPreview();
     });
     $('#f-amount').addEventListener('input', function () {
-      if (splitMode === 'custom') prefillCustom();
+      if (splitMode === 'custom' && !customDirty) prefillCustom();
       renderPreview();
     });
     $('#overlay').addEventListener('change', renderPreview);
     $('#overlay').addEventListener('input', function (ev) {
+      if (ev.target.hasAttribute('data-camt')) customDirty = true;
       if (ev.target.id === 'f-amount' || ev.target.hasAttribute('data-camt')) renderPreview();
     });
     $('#f-receipt').addEventListener('change', function (ev) {
@@ -564,14 +670,19 @@
         split = checkedEqualIds();
         if (!split.length) { toast('Pick at least one person to split with', true); return; }
       } else {
-        shares = customShares();
-        if (!shares || !Object.keys(shares).length) {
-          toast('Enter a valid amount for each person', true);
+        var cs2 = customState();
+        if (cs2.bad) { toast('One of the amounts isn\'t a valid number', true); return; }
+        var sids2 = Object.keys(cs2.shares);
+        if (!sids2.length) { toast('Enter an amount for at least one person', true); return; }
+        var sum2 = sids2.reduce(function (n, id) { return n + cs2.shares[id]; }, 0);
+        if (sum2 !== cents) {
+          var left2 = cents - sum2;
+          toast(left2 > 0 ? formatMoney(left2) + ' still needs to be allocated'
+                          : 'Over by ' + formatMoney(-left2), true);
           return;
         }
-        var sum = Object.keys(shares).reduce(function (n, id) { return n + shares[id]; }, 0);
-        if (sum !== cents) { toast('Shares must add up to ' + formatMoney(cents), true); return; }
-        split = Object.keys(shares);
+        shares = cs2.shares;
+        split = sids2; // members without an amount are left out of the split
       }
       var ex = {
         id: uuid(), groupId: g.id,
@@ -615,8 +726,8 @@
 
     var sugList = simplified.map(function (p, i) {
       return '<button class="sug-row" data-sug="' + i + '">' +
-        '<span>' + avatarHTML(memberById(p.from), ms) +
-        '<b>' + esc(displayName(g.id, p.from)) + '</b> → <b>' +
+        '<span class="sug-left">' + avatarHTML(memberById(p.from), ms) +
+        '<b>' + esc(displayName(g.id, p.from)) + '</b><span class="pays-word">→</span><b>' +
         esc(displayName(g.id, p.to)) + '</b>' +
         avatarHTML(memberById(p.to), ms) + '</span>' +
         '<span class="amt">' + formatMoney(p.amountCents) + '</span></button>';
@@ -662,7 +773,8 @@
 
   function refresh() {
     return backend.getState().then(function (s) {
-      state = s;
+      setState(s);
+      migrateLegacyMe();
       render();
     }).catch(function (err) {
       $('#app').innerHTML = '<main class="wrap"><p class="empty">Couldn\'t load data: ' +

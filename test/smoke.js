@@ -93,5 +93,13 @@ var B = require('../frontend/balances.js');
     paidBy: a1.id, splitAmong: [a1.id, b1.id], shares: { a1: 700, b1: 200 }, date: '2026-10-17',
   }), /add up/);
 
+  // names are normalized to title case (demo backend mirrors the server)
+  var c1 = (await backend.addMember({ id: 'c1', groupId: g2.id, name: '  cara  jones ' })).member;
+  assert.strictEqual(c1.name, 'Cara Jones');
+  await assert.rejects(
+    backend.addMember({ id: 'c2', groupId: g2.id, name: 'CARA JONES' }),
+    /already in this group/
+  );
+
   console.log('smoke test passed: full flow works (group -> members -> expenses -> simplify -> settle -> zero)');
 })().catch(function (e) { console.error('SMOKE FAIL:', e); process.exitCode = 1; });

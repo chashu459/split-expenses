@@ -211,6 +211,14 @@ function DemoBackend() {
   }
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
   function snap(s) { return { state: clone(s) }; }
+  // Same normalization as the server: "jiashu wang" -> "Jiashu Wang",
+  // so the same person is recognized across groups.
+  function titleCase(v) {
+    var parts = String(v).trim().split(/\s+/).filter(Boolean);
+    return parts.map(function (w) {
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    }).join(' ').slice(0, 40);
+  }
 
   return {
     kind: 'demo',
@@ -223,10 +231,10 @@ function DemoBackend() {
     },
     addMember: function (m) {
       var s = load();
-      var name = String(m.name).trim().slice(0, 40);
+      var name = titleCase(m.name);
       if (!name) return Promise.reject(new Error('name cannot be blank'));
       var dupe = s.members.some(function (x) {
-        return x.groupId === m.groupId && x.name.toLowerCase() === name.toLowerCase();
+        return x.groupId === m.groupId && titleCase(x.name) === name;
       });
       if (dupe) return Promise.reject(new Error('that name is already in this group'));
       var member = { id: m.id || uid('m'), groupId: m.groupId, name: name };

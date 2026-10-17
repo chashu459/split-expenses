@@ -274,6 +274,16 @@ function cleanName_(v, max) {
   return s;
 }
 
+/** Member names are normalized to title case so "jiashu wang" and
+ *  "Jiashu Wang" are recognized as the same person everywhere. */
+function normalizeMemberName_(v) {
+  var parts = String(v).trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) throw new Error('name cannot be blank');
+  return parts.map(function (w) {
+    return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  }).join(' ').slice(0, 40);
+}
+
 /** Validate uneven shares: {memberId: cents}, must total amountCents. */
 function parseShares_(v, db, groupId, amountCents) {
   if (v === undefined || v === null || v === '') return null;
@@ -314,10 +324,10 @@ function addMember_(ss, db, body) {
   var id = id_(body.id);
   var existing = findById_(db.members, id);
   if (existing) return { member: existing, duplicate: true };
-  var name = cleanName_(body.name, 40);
+  var name = normalizeMemberName_(body.name);
   var dupe = db.members.some(function (m) {
     return String(m.group_id) === String(body.groupId) &&
-           String(m.name).toLowerCase() === name.toLowerCase();
+           normalizeMemberName_(m.name) === name;
   });
   if (dupe) throw new Error('that name is already in this group');
   var m = { id: id, group_id: String(body.groupId), name: name };
