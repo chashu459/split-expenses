@@ -28,6 +28,39 @@
 
   function todayISO() { return new Date().toISOString().slice(0, 10); }
 
+  function uuid() {
+    try {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+    } catch (_) {}
+    return 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+
+  /* Optimistic mutations: apply locally and render instantly, then sync with
+   * the server through a serial queue. Each link sends its request and applies
+   * the fresh state the server returns; on failure we toast and reload server
+   * truth to roll back. Serial order means a later optimistic change is never
+   * clobbered by an earlier request's refresh. */
+  var opChain = Promise.resolve();
+  function mutate(label, optimisticFn, requestFn) {
+    try { optimisticFn(); } catch (_) {}
+    render();
+    opChain = opChain.then(function () {
+      return Promise.resolve()
+        .then(requestFn)
+        .then(function (out) {
+          state = out.state;
+          render();
+        })
+        .catch(function (err) {
+          toast(label + ' failed (' + (err && err.message || err) + ') — reloading.', true);
+          return backend.getState().then(function (s) {
+            state = s;
+            render();
+          }).catch(function () {});
+        });
+    });
+  }
+
   function membersOf(groupId) {
     return state.members.filter(function (m) { return m.groupId === groupId; });
   }
@@ -232,16 +265,20 @@
     if ((b = $('#settle'))) b.addEventListener('click', function () { settleModal(g, ms); });
     $all('[data-del-exp]').forEach(function (el) {
       el.addEventListener('click', function () {
+        var id = el.getAttribute('data-del-exp');
         if (!confirm('Delete this expense?')) return;
-        backend.deleteExpense(el.getAttribute('data-del-exp'))
-          .then(refresh).catch(function (err) { toast(err.message, true); });
+        mutate('Delete expense',
+          function () { state.expenses = state.expenses.filter(function (e) { return e.id !== id; }); },
+          function () { return backend.deleteExpense(id); });
       });
     });
     $all('[data-del-settle]').forEach(function (el) {
       el.addEventListener('click', function () {
+        var id = el.getAttribute('data-del-settle');
         if (!confirm('Delete this payment?')) return;
-        backend.deleteSettlement(el.getAttribute('data-del-settle'))
-          .then(refresh).catch(function (err) { toast(err.message, true); });
+        mutate('Delete payment',
+          function () { state.settlements = state.settlements.filter(function (s) { return s.id !== id; }); },
+          function () { return backend.deleteSettlement(id); });
       });
     });
   }
@@ -257,11 +294,12 @@
     $('#m-ok').addEventListener('click', function () {
       var name = $('#f-name').value.trim();
       if (!name) { toast('Give the group a name', true); return; }
-      backend.createGroup(name).then(function (g) {
-        view = { name: 'group', id: g.id, tab: 'balances' };
-        return refresh();
-      }).then(function () { addMemberModal(state.groups.filter(function (x) { return x.id === view.id; })[0]); })
-        .catch(function (err) { toast(err.message, true); });
+      var g = { id: uuid(), name: name };
+      view = { name: 'group', id: g.id, tab: 'balances' };
+      mutate('Create group',
+        function () { state.groups.push(g); },
+        function () { return backend.createGroup(g); });
+      addMemberModal({ id: g.id, name: g.name });
     });
   }
 
@@ -274,8 +312,10 @@
     $('#m-ok').addEventListener('click', function () {
       var name = $('#f-name').value.trim();
       if (!name) { toast('Enter a name', true); return; }
-      backend.addMember(g.id, name).then(refresh)
-        .catch(function (err) { toast(err.message, true); });
+      var m = { id: uuid(), groupId: g.id, name: name };
+      mutate('Add person',
+        function () { state.members.push(m); },
+        function () { return backend.addMember(m); });
     });
   }
 
@@ -309,15 +349,18 @@
       var split = $all('[data-split]').filter(function (c) { return c.checked; })
         .map(function (c) { return c.getAttribute('data-split'); });
       if (!split.length) { toast('Pick at least one person to split with', true); return; }
-      backend.addExpense({
-        groupId: g.id,
+      var ex = {
+        id: uuid(), groupId: g.id,
         description: $('#f-desc').value.trim() || 'Expense',
         amountCents: cents,
         paidBy: $('#f-paid').value,
         splitAmong: split,
         date: $('#f-date').value || todayISO(),
-      }).then(function () { view.tab = 'expenses'; return refresh(); })
-        .catch(function (err) { toast(err.message, true); });
+      };
+      view.tab = 'expenses';
+      mutate('Add expense',
+        function () { state.expenses.push(ex); },
+        function () { return backend.addExpense(ex); });
     });
   }
 
@@ -361,11 +404,14 @@
       if (cents === null) { toast('Enter a valid amount', true); return; }
       var from = $('#f-from').value, to = $('#f-to').value;
       if (from === to) { toast('Pick two different people', true); return; }
-      backend.addSettlement({
-        groupId: g.id, fromId: from, toId: to,
+      var st = {
+        id: uuid(), groupId: g.id, fromId: from, toId: to,
         amountCents: cents, date: $('#f-date').value || todayISO(),
-      }).then(function () { view.tab = 'balances'; return refresh(); })
-        .catch(function (err) { toast(err.message, true); });
+      };
+      view.tab = 'balances';
+      mutate('Record payment',
+        function () { state.settlements.push(st); },
+        function () { return backend.addSettlement(st); });
     });
   }
 

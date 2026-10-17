@@ -1,13 +1,17 @@
 /**
- * Storage adapters. Both expose the same async interface:
+ * Storage adapters. Both expose the same async interface. Mutations resolve to
+ * { item, state } (or { state } for deletes), where state is the fresh full
+ * state — one server round trip per action, no separate refresh needed.
  *
  *   getState()      -> { groups, members, expenses, settlements }
- *   createGroup(name)
- *   addMember(groupId, name)
- *   addExpense({groupId, description, amountCents, paidBy, splitAmong, date})
- *   addSettlement({groupId, fromId, toId, amountCents, date})
- *   deleteExpense(id)
- *   deleteSettlement(id)
+ *   createGroup({id?, name})                       -> { group, state }
+ *   addMember({id?, groupId, name})                 -> { member, state }
+ *   addExpense({id?, groupId, description, amountCents, paidBy, splitAmong, date})
+ *                                                   -> { expense, state }
+ *   addSettlement({id?, groupId, fromId, toId, amountCents, date})
+ *                                                   -> { settlement, state }
+ *   deleteExpense(id)                              -> { state }
+ *   deleteSettlement(id)                            -> { state }
  *
  * Shapes (both backends normalize to these):
  *   group:      { id, name }
@@ -74,6 +78,17 @@ function SheetsBackend(url) {
     };
   }
 
+  // Every mutation resolves to { state } plus the normalized item (when any).
+  function withState(res, key, norm) {
+    var out = { state: normState(res.state) };
+    if (key) out[key] = norm(res[key]);
+    return out;
+  }
+  function normGroup(g) { return { id: String(g.id), name: g.name }; }
+  function normMember(m) {
+    return { id: String(m.id), groupId: String(m.group_id), name: m.name };
+  }
+
   return {
     kind: 'sheets',
     getState: function () {
@@ -84,30 +99,34 @@ function SheetsBackend(url) {
           return normState(res.state);
         });
     },
-    createGroup: function (name) {
-      return post({ action: 'createGroup', name: name }).then(function (r) {
-        return { id: String(r.group.id), name: r.group.name };
+    createGroup: function (g) {
+      return post({ action: 'createGroup', id: g.id, name: g.name }).then(function (r) {
+        return withState(r, 'group', normGroup);
       });
     },
-    addMember: function (groupId, name) {
-      return post({ action: 'addMember', groupId: groupId, name: name }).then(function (r) {
-        return { id: String(r.member.id), groupId: String(r.member.group_id), name: r.member.name };
+    addMember: function (m) {
+      return post({ action: 'addMember', id: m.id, groupId: m.groupId, name: m.name }).then(function (r) {
+        return withState(r, 'member', normMember);
       });
     },
     addExpense: function (ex) {
       return post({
-        action: 'addExpense', groupId: ex.groupId, description: ex.description,
+        action: 'addExpense', id: ex.id, groupId: ex.groupId, description: ex.description,
         amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong, date: ex.date,
-      }).then(function (r) { return normExpense(r.expense); });
+      }).then(function (r) { return withState(r, 'expense', normExpense); });
     },
     addSettlement: function (s) {
       return post({
-        action: 'addSettlement', groupId: s.groupId, fromId: s.fromId,
+        action: 'addSettlement', id: s.id, groupId: s.groupId, fromId: s.fromId,
         toId: s.toId, amountCents: s.amountCents, date: s.date,
-      }).then(function (r) { return normSettlement(r.settlement); });
+      }).then(function (r) { return withState(r, 'settlement', normSettlement); });
     },
-    deleteExpense: function (id) { return post({ action: 'deleteExpense', id: id }); },
-    deleteSettlement: function (id) { return post({ action: 'deleteSettlement', id: id }); },
+    deleteExpense: function (id) {
+      return post({ action: 'deleteExpense', id: id }).then(function (r) { return withState(r); });
+    },
+    deleteSettlement: function (id) {
+      return post({ action: 'deleteSettlement', id: id }).then(function (r) { return withState(r); });
+    },
   };
 }
 
@@ -158,27 +177,28 @@ function DemoBackend() {
     } catch (_) { /* private mode etc. */ }
   }
   function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function snap(s) { return { state: clone(s) }; }
 
   return {
     kind: 'demo',
     getState: function () { return Promise.resolve(clone(load())); },
-    createGroup: function (name) {
+    createGroup: function (g) {
       var s = load();
-      var g = { id: uid('g'), name: String(name).slice(0, 80) };
-      s.groups.push(g); save();
-      return Promise.resolve(clone(g));
+      var grp = { id: g.id || uid('g'), name: String(g.name).slice(0, 80) };
+      s.groups.push(grp); save();
+      return Promise.resolve({ group: clone(grp), state: clone(s) });
     },
-    addMember: function (groupId, name) {
+    addMember: function (m) {
       var s = load();
-      name = String(name).trim().slice(0, 40);
+      var name = String(m.name).trim().slice(0, 40);
       if (!name) return Promise.reject(new Error('name cannot be blank'));
-      var dupe = s.members.some(function (m) {
-        return m.groupId === groupId && m.name.toLowerCase() === name.toLowerCase();
+      var dupe = s.members.some(function (x) {
+        return x.groupId === m.groupId && x.name.toLowerCase() === name.toLowerCase();
       });
       if (dupe) return Promise.reject(new Error('that name is already in this group'));
-      var m = { id: uid('m'), groupId: groupId, name: name };
-      s.members.push(m); save();
-      return Promise.resolve(clone(m));
+      var member = { id: m.id || uid('m'), groupId: m.groupId, name: name };
+      s.members.push(member); save();
+      return Promise.resolve({ member: clone(member), state: clone(s) });
     },
     addExpense: function (ex) {
       var s = load();
@@ -187,33 +207,33 @@ function DemoBackend() {
         return Promise.reject(new Error('amount must be positive'));
       }
       var e = {
-        id: uid('e'), groupId: ex.groupId, description: String(ex.description).slice(0, 120) || 'Expense',
+        id: ex.id || uid('e'), groupId: ex.groupId, description: String(ex.description).slice(0, 120) || 'Expense',
         amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong.map(String), date: ex.date,
       };
       s.expenses.push(e); save();
-      return Promise.resolve(clone(e));
+      return Promise.resolve({ expense: clone(e), state: clone(s) });
     },
     addSettlement: function (st) {
       var s = load();
       if (st.fromId === st.toId) return Promise.reject(new Error('pick two different people'));
       var x = {
-        id: uid('s'), groupId: st.groupId, fromId: st.fromId, toId: st.toId,
+        id: st.id || uid('s'), groupId: st.groupId, fromId: st.fromId, toId: st.toId,
         amountCents: st.amountCents, date: st.date,
       };
       s.settlements.push(x); save();
-      return Promise.resolve(clone(x));
+      return Promise.resolve({ settlement: clone(x), state: clone(s) });
     },
     deleteExpense: function (id) {
       var s = load();
       s.expenses = s.expenses.filter(function (e) { return e.id !== id; });
       save();
-      return Promise.resolve({ ok: true });
+      return Promise.resolve(snap(s));
     },
     deleteSettlement: function (id) {
       var s = load();
       s.settlements = s.settlements.filter(function (x) { return x.id !== id; });
       save();
-      return Promise.resolve({ ok: true });
+      return Promise.resolve(snap(s));
     },
     reset: function () { store = seed(); save(); return Promise.resolve(); },
   };

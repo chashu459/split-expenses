@@ -10,17 +10,25 @@
  *       Execute as: Me
  *       Who has access: Anyone
  *     Copy the Web App URL into the frontend's config.js as API_URL.
+ *     After editing this file, redeploy as a NEW VERSION or the live URL
+ *     keeps running the old code.
  *
  * API
  *  GET  ?action=state
- *       -> { ok:true, groups:[], members:[], expenses:[], settlements:[] }
- *  POST { action:'createGroup', name }
- *  POST { action:'addMember', groupId, name }
- *  POST { action:'addExpense', groupId, description, amountCents, paidBy,
- *                          splitAmong:[memberId...], date }
- *  POST { action:'addSettlement', groupId, fromId, toId, amountCents, date }
- *  POST { action:'deleteExpense', id }
- *  POST { action:'deleteSettlement', id }
+ *       -> { ok:true, state:{ groups, members, expenses, settlements } }
+ *  POST { action:'createGroup', id?, name }                 -> { ok, group, state }
+ *  POST { action:'addMember', id?, groupId, name }          -> { ok, member, state }
+ *  POST { action:'addExpense', id?, groupId, description,
+ *                          amountCents, paidBy, splitAmong:[ids], date }
+ *       -> { ok, expense, state }
+ *  POST { action:'addSettlement', id?, groupId, fromId, toId, amountCents, date }
+ *       -> { ok, settlement, state }
+ *  POST { action:'deleteExpense', id }                      -> { ok, state }
+ *  POST { action:'deleteSettlement', id }                   -> { ok, state }
+ *
+ * Every POST returns the fresh full state, so clients need only one request
+ * per action. Clients may supply `id` (a UUID they generated); writes are
+ * idempotent on it, so a retried request never creates a duplicate row.
  *
  * All money is integer cents. All responses are JSON.
  * POST bodies must be sent as text/plain (no Content-Type header) so the
@@ -54,7 +62,7 @@ function bootstrap() {
 function doGet(e) {
   try {
     var action = (e && e.parameter && e.parameter.action) || '';
-    if (action === 'state') return json_({ ok: true, state: readState_() });
+    if (action === 'state') return json_({ ok: true, state: readDb() });
     return json_({ ok: false, error: 'unknown action: ' + action });
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
@@ -66,16 +74,20 @@ function doPost(e) {
   try {
     lock.waitLock(10000);
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var db = readDb(ss); // each tab read exactly once per request
     var out;
     switch (body.action) {
-      case 'createGroup':    out = createGroup_(body);    break;
-      case 'addMember':      out = addMember_(body);      break;
-      case 'addExpense':     out = addExpense_(body);     break;
-      case 'addSettlement':  out = addSettlement_(body);  break;
-      case 'deleteExpense':  out = deleteRow_(TABS.expenses, 'expenses', body.id);    break;
-      case 'deleteSettlement': out = deleteRow_(TABS.settlements, 'settlements', body.id); break;
+      case 'createGroup':      out = createGroup_(ss, db, body);      break;
+      case 'addMember':        out = addMember_(ss, db, body);        break;
+      case 'addExpense':       out = addExpense_(ss, db, body);      break;
+      case 'addSettlement':    out = addSettlement_(ss, db, body);   break;
+      case 'deleteExpense':    out = deleteExpense_(ss, db, body);    break;
+      case 'deleteSettlement': out = deleteSettlement_(ss, db, body); break;
       default: return json_({ ok: false, error: 'unknown action: ' + body.action });
     }
+    out.ok = true;
+    out.state = db; // db was updated in-memory by the action; lock was held throughout
     return json_(out);
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
@@ -92,15 +104,13 @@ function json_(obj) {
 
 /* ---------------- storage helpers ---------------- */
 
-function sheet_(tab) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
+function sheet_(ss, tab) {
   var sheet = ss.getSheetByName(tab);
   if (!sheet) throw new Error('missing tab "' + tab + '" — run bootstrap() first');
   return sheet;
 }
 
-function rows_(tab) {
-  var sheet = sheet_(tab);
+function rowsIn_(sheet) {
   var values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
   var headers = values[0].map(String);
@@ -111,25 +121,40 @@ function rows_(tab) {
   });
 }
 
-function readState_() {
+function parseExpense_(e) {
+  e.amount_cents = Number(e.amount_cents);
+  try { e.split_among = JSON.parse(e.split_among); }
+  catch (_) { e.split_among = []; }
+  if (!Array.isArray(e.split_among)) e.split_among = [];
+  return e;
+}
+
+function parseSettlement_(s) {
+  s.amount_cents = Number(s.amount_cents);
+  return s;
+}
+
+/** Read every tab once; returns parsed rows in sheet (snake_case) shape. */
+function readDb(ss) {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
   return {
-    groups: rows_('groups'),
-    members: rows_('members'),
-    expenses: rows_('expenses').map(function (e) {
-      e.amount_cents = Number(e.amount_cents);
-      try { e.split_among = JSON.parse(e.split_among); }
-      catch (_) { e.split_among = []; }
-      return e;
-    }),
-    settlements: rows_('settlements').map(function (s) {
-      s.amount_cents = Number(s.amount_cents);
-      return s;
-    }),
+    groups: rowsIn_(sheet_(ss, 'groups')),
+    members: rowsIn_(sheet_(ss, 'members')),
+    expenses: rowsIn_(sheet_(ss, 'expenses')).map(parseExpense_),
+    settlements: rowsIn_(sheet_(ss, 'settlements')).map(parseSettlement_),
   };
 }
 
 function now_() { return new Date().toISOString(); }
 function uuid_() { return Utilities.getUuid(); }
+
+function findById_(rows, id) {
+  id = String(id);
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].id) === id) return rows[i];
+  }
+  return null;
+}
 
 /* ---------------- validation ---------------- */
 
@@ -141,21 +166,25 @@ function need_(body, fields) {
   });
 }
 
-function groupExists_(groupId) {
-  return rows_('groups').some(function (g) { return String(g.id) === String(groupId); });
+/** Client-supplied id (for idempotent retries), or a fresh UUID. */
+function id_(v) {
+  if (v === undefined || v === null || v === '') return uuid_();
+  var s = String(v);
+  if (s.length > 64) throw new Error('bad id');
+  return s;
 }
 
-function memberIds_(groupId) {
-  var ids = {};
-  rows_('members').forEach(function (m) {
-    if (String(m.group_id) === String(groupId)) ids[String(m.id)] = true;
+function getGroup_(db, groupId) {
+  var g = findById_(db.groups, groupId);
+  if (!g) throw new Error('unknown group');
+  return g;
+}
+
+function checkMembers_(db, groupId, ids) {
+  var valid = {};
+  db.members.forEach(function (m) {
+    if (String(m.group_id) === String(groupId)) valid[String(m.id)] = true;
   });
-  return ids;
-}
-
-function assertGroupAndMembers_(groupId, ids) {
-  if (!groupExists_(groupId)) throw new Error('unknown group');
-  var valid = memberIds_(groupId);
   (ids || []).forEach(function (id) {
     if (!valid[String(id)]) throw new Error('member not in group: ' + id);
   });
@@ -167,62 +196,83 @@ function assertCents_(v) {
   return n;
 }
 
-/* ---------------- actions ---------------- */
-
-function createGroup_(body) {
-  need_(body, ['name']);
-  var g = { id: uuid_(), name: String(body.name).slice(0, 80), created_at: now_() };
-  sheet_('groups').appendRow([g.id, g.name, g.created_at]);
-  return { ok: true, group: g };
+function cleanName_(v, max) {
+  var s = String(v).trim().slice(0, max);
+  if (!s) throw new Error('name cannot be blank');
+  return s;
 }
 
-function addMember_(body) {
-  need_(body, ['groupId', 'name']);
-  if (!groupExists_(body.groupId)) throw new Error('unknown group');
-  var name = String(body.name).trim().slice(0, 40);
-  if (!name) throw new Error('name cannot be blank');
-  var dupe = rows_('members').some(function (m) {
+/* ---------------- actions ---------------- */
+
+function createGroup_(ss, db, body) {
+  var id = id_(body.id);
+  var existing = findById_(db.groups, id);
+  if (existing) return { group: existing, duplicate: true };
+  var g = { id: id, name: cleanName_(body.name, 80), created_at: now_() };
+  sheet_(ss, 'groups').appendRow([g.id, g.name, g.created_at]);
+  db.groups.push(g);
+  return { group: g };
+}
+
+function addMember_(ss, db, body) {
+  need_(body, ['groupId']);
+  getGroup_(db, body.groupId);
+  var id = id_(body.id);
+  var existing = findById_(db.members, id);
+  if (existing) return { member: existing, duplicate: true };
+  var name = cleanName_(body.name, 40);
+  var dupe = db.members.some(function (m) {
     return String(m.group_id) === String(body.groupId) &&
            String(m.name).toLowerCase() === name.toLowerCase();
   });
   if (dupe) throw new Error('that name is already in this group');
-  var m = { id: uuid_(), group_id: String(body.groupId), name: name };
-  sheet_('members').appendRow([m.id, m.group_id, m.name]);
-  return { ok: true, member: m };
+  var m = { id: id, group_id: String(body.groupId), name: name };
+  sheet_(ss, 'members').appendRow([m.id, m.group_id, m.name]);
+  db.members.push(m);
+  return { member: m };
 }
 
-function addExpense_(body) {
+function addExpense_(ss, db, body) {
   need_(body, ['groupId', 'description', 'amountCents', 'paidBy', 'splitAmong', 'date']);
+  var id = id_(body.id);
+  var existing = findById_(db.expenses, id);
+  if (existing) return { expense: existing, duplicate: true };
   var cents = assertCents_(body.amountCents);
   var splitAmong = body.splitAmong.map(String);
   if (!splitAmong.length) throw new Error('splitAmong cannot be empty');
-  assertGroupAndMembers_(body.groupId, splitAmong.concat([body.paidBy]));
+  getGroup_(db, body.groupId);
+  checkMembers_(db, body.groupId, splitAmong.concat([body.paidBy]));
   var ex = {
-    id: uuid_(),
+    id: id,
     group_id: String(body.groupId),
     description: String(body.description).trim().slice(0, 120) || 'Expense',
     amount_cents: cents,
     paid_by: String(body.paidBy),
-    split_among: JSON.stringify(splitAmong),
+    split_among: splitAmong,
     date: String(body.date).slice(0, 10),
     created_at: now_(),
   };
-  sheet_('expenses').appendRow([
+  sheet_(ss, 'expenses').appendRow([
     ex.id, ex.group_id, ex.description, ex.amount_cents, ex.paid_by,
-    ex.split_among, ex.date, ex.created_at,
+    JSON.stringify(ex.split_among), ex.date, ex.created_at,
   ]);
-  return { ok: true, expense: ex };
+  db.expenses.push(ex);
+  return { expense: ex };
 }
 
-function addSettlement_(body) {
+function addSettlement_(ss, db, body) {
   need_(body, ['groupId', 'fromId', 'toId', 'amountCents', 'date']);
+  var id = id_(body.id);
+  var existing = findById_(db.settlements, id);
+  if (existing) return { settlement: existing, duplicate: true };
   if (String(body.fromId) === String(body.toId)) {
     throw new Error('a settlement needs two different people');
   }
   var cents = assertCents_(body.amountCents);
-  assertGroupAndMembers_(body.groupId, [body.fromId, body.toId]);
+  getGroup_(db, body.groupId);
+  checkMembers_(db, body.groupId, [body.fromId, body.toId]);
   var s = {
-    id: uuid_(),
+    id: id,
     group_id: String(body.groupId),
     from_id: String(body.fromId),
     to_id: String(body.toId),
@@ -230,21 +280,43 @@ function addSettlement_(body) {
     date: String(body.date).slice(0, 10),
     created_at: now_(),
   };
-  sheet_('settlements').appendRow([
+  sheet_(ss, 'settlements').appendRow([
     s.id, s.group_id, s.from_id, s.to_id, s.amount_cents, s.date, s.created_at,
   ]);
-  return { ok: true, settlement: s };
+  db.settlements.push(s);
+  return { settlement: s };
 }
 
-function deleteRow_(headers, tab, id) {
-  if (!id) throw new Error('missing field: id');
-  var sheet = sheet_(tab);
+function deleteExpense_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var sheet = sheet_(ss, 'expenses');
   var values = sheet.getDataRange().getValues();
+  var found = false;
   for (var r = 1; r < values.length; r++) {
-    if (String(values[r][0]) === String(id)) {
+    if (String(values[r][0]) === String(body.id)) {
       sheet.deleteRow(r + 1);
-      return { ok: true };
+      found = true;
+      break;
     }
   }
-  throw new Error('not found');
+  if (!found) throw new Error('not found');
+  db.expenses = db.expenses.filter(function (x) { return String(x.id) !== String(body.id); });
+  return {};
+}
+
+function deleteSettlement_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var sheet = sheet_(ss, 'settlements');
+  var values = sheet.getDataRange().getValues();
+  var found = false;
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(body.id)) {
+      sheet.deleteRow(r + 1);
+      found = true;
+      break;
+    }
+  }
+  if (!found) throw new Error('not found');
+  db.settlements = db.settlements.filter(function (x) { return String(x.id) !== String(body.id); });
+  return {};
 }

@@ -10,26 +10,33 @@ var B = require('../frontend/balances.js');
   assert.strictEqual(backend.kind, 'demo');
 
   // fresh group
-  var g = await backend.createGroup('Weekend cabin');
-  var alice = await backend.addMember(g.id, 'Alice');
-  var bob = await backend.addMember(g.id, 'Bob');
-  var cara = await backend.addMember(g.id, 'Cara');
+  var out = await backend.createGroup({ id: 'g1', name: 'Weekend cabin' });
+  var g = out.group;
+  assert.ok(out.state.groups.some(function (x) { return x.id === 'g1'; }),
+    'createGroup returns fresh state including the new group');
+
+  var m1 = (await backend.addMember({ id: 'm1', groupId: g.id, name: 'Alice' })).member;
+  var m2 = (await backend.addMember({ id: 'm2', groupId: g.id, name: 'Bob' })).member;
+  var m3 = (await backend.addMember({ id: 'm3', groupId: g.id, name: 'Cara' })).member;
 
   // duplicate name rejected
-  await assert.rejects(backend.addMember(g.id, 'alice'), /already in this group/);
+  await assert.rejects(backend.addMember({ id: 'm4', groupId: g.id, name: 'alice' }), /already in this group/);
 
   // expenses
-  await backend.addExpense({
-    groupId: g.id, description: 'Groceries', amountCents: 12000,
-    paidBy: alice.id, splitAmong: [alice.id, bob.id, cara.id], date: '2026-10-16',
+  var r1 = await backend.addExpense({
+    id: 'e1', groupId: g.id, description: 'Groceries', amountCents: 12000,
+    paidBy: m1.id, splitAmong: [m1.id, m2.id, m3.id], date: '2026-10-16',
   });
+  assert.strictEqual(r1.expense.id, 'e1', 'client-supplied id is kept');
+  assert.ok(r1.state.expenses.some(function (e) { return e.id === 'e1'; }),
+    'addExpense returns fresh state including the new expense');
   await backend.addExpense({
-    groupId: g.id, description: 'Firewood', amountCents: 4500,
-    paidBy: bob.id, splitAmong: [alice.id, bob.id], date: '2026-10-16',
+    id: 'e2', groupId: g.id, description: 'Firewood', amountCents: 4500,
+    paidBy: m2.id, splitAmong: [m1.id, m2.id], date: '2026-10-16',
   });
   // invalid expense rejected
   await assert.rejects(
-    backend.addExpense({ groupId: g.id, description: 'x', amountCents: 0, paidBy: alice.id, splitAmong: [alice.id], date: '2026-10-16' }),
+    backend.addExpense({ id: 'e3', groupId: g.id, description: 'x', amountCents: 0, paidBy: m1.id, splitAmong: [m1.id], date: '2026-10-16' }),
     /positive/
   );
 
@@ -39,37 +46,34 @@ var B = require('../frontend/balances.js');
   assert.strictEqual(ex.length, 2);
 
   // Groceries: Alice +8000, Bob -4000, Cara -4000
-  // Firewood: Bob +2250 net of his share... compute: Bob paid 4500, share 2250 -> +2250; Alice -2250
+  // Firewood: Bob paid 4500, share 2250 -> +2250; Alice -2250
   // Totals: Alice 8000-2250=5750, Bob -4000+2250=-1750, Cara -4000
   var bal = B.computeBalances(ms, ex, []);
-  assert.deepStrictEqual(bal, { [alice.id]: 5750, [bob.id]: -1750, [cara.id]: -4000 });
+  assert.deepStrictEqual(bal, { m1: 5750, m2: -1750, m3: -4000 });
 
   var pays = B.simplifyDebts(bal);
   assert.strictEqual(pays.length, 2);
-  // Bob -> Alice 1750, Cara -> Alice 4000
-  var toAlice = pays.filter(function (p) { return p.to === alice.id; });
+  var toAlice = pays.filter(function (p) { return p.to === m1.id; });
   assert.strictEqual(toAlice.reduce(function (n, p) { return n + p.amountCents; }, 0), 5750);
 
-  // record suggested payment, balances zero out
-  await backend.addSettlement({
-    groupId: g.id, fromId: bob.id, toId: alice.id, amountCents: 1750, date: '2026-10-16',
+  // record suggested payments, balances zero out
+  var st1 = await backend.addSettlement({
+    id: 's1', groupId: g.id, fromId: m2.id, toId: m1.id, amountCents: 1750, date: '2026-10-16',
   });
+  assert.strictEqual(st1.state.settlements.length, 1, 'addSettlement returns fresh state');
   await backend.addSettlement({
-    groupId: g.id, fromId: cara.id, toId: alice.id, amountCents: 4000, date: '2026-10-16',
+    id: 's2', groupId: g.id, fromId: m3.id, toId: m1.id, amountCents: 4000, date: '2026-10-16',
   });
   s = await backend.getState();
   ex = s.expenses.filter(function (e) { return e.groupId === g.id; });
   var st = s.settlements.filter(function (x) { return x.groupId === g.id; });
   bal = B.computeBalances(ms, ex, st);
-  assert.deepStrictEqual(bal, { [alice.id]: 0, [bob.id]: 0, [cara.id]: 0 });
+  assert.deepStrictEqual(bal, { m1: 0, m2: 0, m3: 0 });
   assert.deepStrictEqual(B.simplifyDebts(bal), []);
 
-  // delete an expense -> balances change
-  var delId = ex[0].id;
-  await backend.deleteExpense(delId);
-  s = await backend.getState();
-  ex = s.expenses.filter(function (e) { return e.groupId === g.id; });
-  assert.strictEqual(ex.length, 1);
+  // delete an expense -> balances change; delete returns fresh state
+  var del = await backend.deleteExpense('e1');
+  assert.strictEqual(del.state.expenses.filter(function (e) { return e.groupId === g.id; }).length, 1);
 
   console.log('smoke test passed: full flow works (group -> members -> expenses -> simplify -> settle -> zero)');
 })().catch(function (e) { console.error('SMOKE FAIL:', e); process.exitCode = 1; });

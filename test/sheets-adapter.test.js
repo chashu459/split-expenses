@@ -12,11 +12,12 @@ global.fetch = function (url, opts) {
     json = {
       ok: true,
       expense: {
-        id: 'e1', group_id: 'g1', description: body.description,
+        id: body.id, group_id: 'g1', description: body.description,
         amount_cents: body.amountCents, paid_by: body.paidBy,
         split_among: JSON.stringify(body.splitAmong), // <-- string, like the real server
         date: body.date, created_at: '2026-10-17T00:00:00.000Z',
       },
+      state: { groups: [], members: [], expenses: [], settlements: [] },
     };
   } else {
     json = { ok: true, state: { groups: [], members: [], expenses: [], settlements: [] } };
@@ -27,12 +28,14 @@ global.fetch = function (url, opts) {
 (async function () {
   var backend = api.SheetsBackend('https://example.com/exec');
 
-  var ex = await backend.addExpense({
-    groupId: 'g1', description: 'Lunch', amountCents: 3000,
+  var out = await backend.addExpense({
+    id: 'client-uuid-1', groupId: 'g1', description: 'Lunch', amountCents: 3000,
     paidBy: 'm1', splitAmong: ['m1', 'm2'], date: '2026-10-17',
   });
-  assert.deepStrictEqual(ex.splitAmong, ['m1', 'm2']);
-  assert.strictEqual(ex.amountCents, 3000);
+  assert.deepStrictEqual(out.expense.splitAmong, ['m1', 'm2']);
+  assert.strictEqual(out.expense.amountCents, 3000);
+  assert.strictEqual(out.expense.id, 'client-uuid-1');
+  assert.ok(out.state, 'mutation returns fresh state');
   console.log('ok - addExpense handles string split_among (no more .map TypeError)');
 
   var state = await backend.getState();
