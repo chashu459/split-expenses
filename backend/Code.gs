@@ -5,30 +5,37 @@
  *  1. Create a new Google Sheet (this script must be bound to it:
  *     Extensions > Apps Script from that sheet, then paste this file).
  *  2. Run `bootstrap` once from the Apps Script editor (it creates the
- *     Groups / Members / Expenses / Settlements tabs with headers).
+ *     Groups / Members / Expenses / Settlements tabs with headers; on an
+ *     existing sheet it adds any missing columns without touching data).
  *  3. Deploy > New deployment > Web app:
  *       Execute as: Me
  *       Who has access: Anyone
  *     Copy the Web App URL into the frontend's config.js as API_URL.
  *     After editing this file, redeploy as a NEW VERSION or the live URL
- *     keeps running the old code.
+ *     keeps running the old code. The receipts feature needs Drive access,
+ *     so Google will ask you to re-authorize on the first deploy that
+ *     includes it.
  *
  * API
  *  GET  ?action=state
  *       -> { ok:true, state:{ groups, members, expenses, settlements } }
  *  POST { action:'createGroup', id?, name }                 -> { ok, group, state }
  *  POST { action:'addMember', id?, groupId, name }          -> { ok, member, state }
- *  POST { action:'addExpense', id?, groupId, description,
- *                          amountCents, paidBy, splitAmong:[ids], date }
- *       -> { ok, expense, state }
+ *  POST { action:'addExpense', id?, groupId, description, amountCents,
+ *                          paidBy, splitAmong:[ids], shares?({id:cents}),
+ *                          date }                           -> { ok, expense, state }
  *  POST { action:'addSettlement', id?, groupId, fromId, toId, amountCents, date }
  *       -> { ok, settlement, state }
  *  POST { action:'deleteExpense', id }                      -> { ok, state }
  *  POST { action:'deleteSettlement', id }                   -> { ok, state }
+ *  POST { action:'uploadReceipt', expenseId, name?, mimeType?, data(base64) }
+ *       -> { ok, receiptId, state }
  *
  * Every POST returns the fresh full state, so clients need only one request
  * per action. Clients may supply `id` (a UUID they generated); writes are
  * idempotent on it, so a retried request never creates a duplicate row.
+ * `shares` is an optional per-person split ({memberId: cents}); it must add
+ * up to amountCents. Without it, the amount splits equally among splitAmong.
  *
  * All money is integer cents. All responses are JSON.
  * POST bodies must be sent as text/plain (no Content-Type header) so the
@@ -40,20 +47,33 @@ var TABS = {
   groups:      ['id', 'name', 'created_at'],
   members:     ['id', 'group_id', 'name'],
   expenses:    ['id', 'group_id', 'description', 'amount_cents', 'paid_by',
-                'split_among', 'date', 'created_at'],
+                'split_among', 'shares', 'receipt_id', 'date', 'created_at'],
   settlements: ['id', 'group_id', 'from_id', 'to_id', 'amount_cents',
                 'date', 'created_at'],
 };
 
-/** Run once from the editor to create tabs + headers. */
+/** Columns stored as JSON text in the sheet. */
+var JSON_COLS = ['split_among', 'shares'];
+
+/** Run once from the editor. Creates tabs; on existing tabs adds any columns
+ *  introduced by newer versions without touching existing data. */
 function bootstrap() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   Object.keys(TABS).forEach(function (tab) {
     var sheet = ss.getSheetByName(tab) || ss.insertSheet(tab);
+    var want = TABS[tab];
     if (sheet.getLastRow() === 0) {
-      sheet.appendRow(TABS[tab]);
+      sheet.appendRow(want);
       sheet.setFrozenRows(1);
+      return;
     }
+    var have = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+    want.forEach(function (h) {
+      if (have.indexOf(h) === -1) {
+        sheet.getRange(1, have.length + 1).setValue(h);
+        have.push(h);
+      }
+    });
   });
 }
 
@@ -80,10 +100,11 @@ function doPost(e) {
     switch (body.action) {
       case 'createGroup':      out = createGroup_(ss, db, body);      break;
       case 'addMember':        out = addMember_(ss, db, body);        break;
-      case 'addExpense':       out = addExpense_(ss, db, body);      break;
+      case 'addExpense':       out = addExpense_(ss, db, body);       break;
       case 'addSettlement':    out = addSettlement_(ss, db, body);   break;
       case 'deleteExpense':    out = deleteExpense_(ss, db, body);    break;
       case 'deleteSettlement': out = deleteSettlement_(ss, db, body); break;
+      case 'uploadReceipt':    out = uploadReceipt_(ss, db, body);    break;
       default: return json_({ ok: false, error: 'unknown action: ' + body.action });
     }
     out.ok = true;
@@ -110,6 +131,10 @@ function sheet_(ss, tab) {
   return sheet;
 }
 
+function headersOf_(sheet) {
+  return sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0].map(String);
+}
+
 function rowsIn_(sheet) {
   var values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
@@ -121,16 +146,63 @@ function rowsIn_(sheet) {
   });
 }
 
+/** Append using the sheet's actual header order, so column order never matters. */
+function appendObj_(ss, tab, obj) {
+  var sheet = sheet_(ss, tab);
+  var headers = headersOf_(sheet);
+  sheet.appendRow(headers.map(function (h) {
+    var v = obj[h];
+    if (v === undefined || v === null) return '';
+    if (JSON_COLS.indexOf(h) !== -1) return JSON.stringify(v);
+    return v;
+  }));
+}
+
+/** Update one cell identified by row id + column header. */
+function setCellById_(ss, tab, id, header, value) {
+  var sheet = sheet_(ss, tab);
+  var values = sheet.getDataRange().getValues();
+  var headers = values[0].map(String);
+  var col = headers.indexOf(header);
+  if (col === -1) throw new Error('missing column "' + header + '" — run bootstrap()');
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(id)) {
+      sheet.getRange(r + 1, col + 1).setValue(value);
+      return;
+    }
+  }
+  throw new Error('not found');
+}
+
+/** Sheets may auto-convert "2026-10-17" text into Date objects; normalize. */
+function dateStr_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]' && !isNaN(v.getTime())) {
+    try { return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd'); }
+    catch (_) { /* fall through to string handling */ }
+  }
+  return String(v == null ? '' : v).slice(0, 10);
+}
+
+function parseJsonCol_(v) {
+  if (v === undefined || v === null || v === '') return null;
+  if (typeof v === 'object') return v;
+  try { return JSON.parse(v); } catch (_) { return null; }
+}
+
 function parseExpense_(e) {
   e.amount_cents = Number(e.amount_cents);
-  try { e.split_among = JSON.parse(e.split_among); }
-  catch (_) { e.split_among = []; }
-  if (!Array.isArray(e.split_among)) e.split_among = [];
+  var sm = parseJsonCol_(e.split_among);
+  e.split_among = Array.isArray(sm) ? sm.map(String) : [];
+  var sh = parseJsonCol_(e.shares);
+  e.shares = (sh && typeof sh === 'object' && !Array.isArray(sh)) ? sh : null;
+  e.receipt_id = String(e.receipt_id || '');
+  e.date = dateStr_(e.date);
   return e;
 }
 
 function parseSettlement_(s) {
   s.amount_cents = Number(s.amount_cents);
+  s.date = dateStr_(s.date);
   return s;
 }
 
@@ -202,6 +274,28 @@ function cleanName_(v, max) {
   return s;
 }
 
+/** Validate uneven shares: {memberId: cents}, must total amountCents. */
+function parseShares_(v, db, groupId, amountCents) {
+  if (v === undefined || v === null || v === '') return null;
+  var obj = (typeof v === 'object') ? v : JSON.parse(v);
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+    throw new Error('shares must be an object of member id to cents');
+  }
+  var ids = Object.keys(obj);
+  if (!ids.length) return null;
+  var sum = 0;
+  var clean = {};
+  ids.forEach(function (id) {
+    var n = Number(obj[id]);
+    if (!Number.isInteger(n) || n < 0) throw new Error('shares must be non-negative integer cents');
+    clean[String(id)] = n;
+    sum += n;
+  });
+  if (sum !== amountCents) throw new Error('shares must add up to the total amount');
+  checkMembers_(db, groupId, ids);
+  return clean;
+}
+
 /* ---------------- actions ---------------- */
 
 function createGroup_(ss, db, body) {
@@ -209,7 +303,7 @@ function createGroup_(ss, db, body) {
   var existing = findById_(db.groups, id);
   if (existing) return { group: existing, duplicate: true };
   var g = { id: id, name: cleanName_(body.name, 80), created_at: now_() };
-  sheet_(ss, 'groups').appendRow([g.id, g.name, g.created_at]);
+  appendObj_(ss, 'groups', g);
   db.groups.push(g);
   return { group: g };
 }
@@ -227,7 +321,7 @@ function addMember_(ss, db, body) {
   });
   if (dupe) throw new Error('that name is already in this group');
   var m = { id: id, group_id: String(body.groupId), name: name };
-  sheet_(ss, 'members').appendRow([m.id, m.group_id, m.name]);
+  appendObj_(ss, 'members', m);
   db.members.push(m);
   return { member: m };
 }
@@ -242,6 +336,11 @@ function addExpense_(ss, db, body) {
   if (!splitAmong.length) throw new Error('splitAmong cannot be empty');
   getGroup_(db, body.groupId);
   checkMembers_(db, body.groupId, splitAmong.concat([body.paidBy]));
+  var shares = parseShares_(body.shares, db, body.groupId, cents);
+  if (shares) {
+    var shareIds = Object.keys(shares);
+    if (!shareIds.length) throw new Error('shares cannot be empty');
+  }
   var ex = {
     id: id,
     group_id: String(body.groupId),
@@ -249,13 +348,12 @@ function addExpense_(ss, db, body) {
     amount_cents: cents,
     paid_by: String(body.paidBy),
     split_among: splitAmong,
-    date: String(body.date).slice(0, 10),
+    shares: shares,
+    receipt_id: '',
+    date: dateStr_(body.date),
     created_at: now_(),
   };
-  sheet_(ss, 'expenses').appendRow([
-    ex.id, ex.group_id, ex.description, ex.amount_cents, ex.paid_by,
-    JSON.stringify(ex.split_among), ex.date, ex.created_at,
-  ]);
+  appendObj_(ss, 'expenses', ex);
   db.expenses.push(ex);
   return { expense: ex };
 }
@@ -277,12 +375,10 @@ function addSettlement_(ss, db, body) {
     from_id: String(body.fromId),
     to_id: String(body.toId),
     amount_cents: cents,
-    date: String(body.date).slice(0, 10),
+    date: dateStr_(body.date),
     created_at: now_(),
   };
-  sheet_(ss, 'settlements').appendRow([
-    s.id, s.group_id, s.from_id, s.to_id, s.amount_cents, s.date, s.created_at,
-  ]);
+  appendObj_(ss, 'settlements', s);
   db.settlements.push(s);
   return { settlement: s };
 }
@@ -319,4 +415,28 @@ function deleteSettlement_(ss, db, body) {
   if (!found) throw new Error('not found');
   db.settlements = db.settlements.filter(function (x) { return String(x.id) !== String(body.id); });
   return {};
+}
+
+/* ---------------- receipts ---------------- */
+
+function receiptFolder_() {
+  var it = DriveApp.getFoldersByName('Split Expenses Receipts');
+  if (it.hasNext()) return it.next();
+  return DriveApp.createFolder('Split Expenses Receipts');
+}
+
+/** Body: { expenseId, name?, mimeType?, data } where data is base64 (no prefix). */
+function uploadReceipt_(ss, db, body) {
+  need_(body, ['expenseId', 'data']);
+  var ex = findById_(db.expenses, body.expenseId);
+  if (!ex) throw new Error('unknown expense');
+  var bytes = Utilities.base64Decode(String(body.data));
+  if (bytes.length > 15 * 1024 * 1024) throw new Error('receipt too large (max 15MB)');
+  var blob = Utilities.newBlob(bytes, body.mimeType || 'image/jpeg', body.name || 'receipt.jpg');
+  var file = receiptFolder_().createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  var fid = file.getId();
+  setCellById_(ss, 'expenses', ex.id, 'receipt_id', fid);
+  ex.receipt_id = fid;
+  return { receiptId: fid };
 }

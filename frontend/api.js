@@ -6,10 +6,14 @@
  *   getState()      -> { groups, members, expenses, settlements }
  *   createGroup({id?, name})                       -> { group, state }
  *   addMember({id?, groupId, name})                 -> { member, state }
- *   addExpense({id?, groupId, description, amountCents, paidBy, splitAmong, date})
+ *   addExpense({id?, groupId, description, amountCents, paidBy, splitAmong, shares?, date})
  *                                                   -> { expense, state }
+ *     shares is an optional uneven split: {memberId: cents}, must total amountCents.
+ *     Without it, the amount splits equally among splitAmong.
  *   addSettlement({id?, groupId, fromId, toId, amountCents, date})
  *                                                   -> { settlement, state }
+ *   uploadReceipt({expenseId, name?, mimeType?, data}) -> { receiptId, state }
+ *     data is base64 (no data: prefix); stored in the owner's Google Drive.
  *   deleteExpense(id)                              -> { state }
  *   deleteSettlement(id)                            -> { state }
  *
@@ -63,8 +67,28 @@ function SheetsBackend(url) {
       amountCents: Number(e.amount_cents !== undefined ? e.amount_cents : e.amountCents),
       paidBy: String(e.paid_by !== undefined ? e.paid_by : e.paidBy),
       splitAmong: asArray(e.split_among !== undefined ? e.split_among : e.splitAmong).map(String),
+      shares: parseSharesField(e.shares),
+      receiptId: String(e.receipt_id !== undefined ? e.receipt_id : (e.receiptId || '')),
       date: e.date,
     };
+  }
+
+  function parseSharesField(v) {
+    if (!v) return null;
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      var out = {};
+      Object.keys(v).forEach(function (k) { out[String(k)] = Number(v[k]); });
+      return out;
+    }
+    try {
+      var p = JSON.parse(v);
+      if (p && typeof p === 'object' && !Array.isArray(p)) {
+        var q = {};
+        Object.keys(p).forEach(function (k) { q[String(k)] = Number(p[k]); });
+        return q;
+      }
+    } catch (_) {}
+    return null;
   }
 
   function normSettlement(s) {
@@ -112,7 +136,8 @@ function SheetsBackend(url) {
     addExpense: function (ex) {
       return post({
         action: 'addExpense', id: ex.id, groupId: ex.groupId, description: ex.description,
-        amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong, date: ex.date,
+        amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong,
+        shares: ex.shares || null, date: ex.date,
       }).then(function (r) { return withState(r, 'expense', normExpense); });
     },
     addSettlement: function (s) {
@@ -126,6 +151,14 @@ function SheetsBackend(url) {
     },
     deleteSettlement: function (id) {
       return post({ action: 'deleteSettlement', id: id }).then(function (r) { return withState(r); });
+    },
+    uploadReceipt: function (r) {
+      return post({
+        action: 'uploadReceipt', expenseId: r.expenseId, name: r.name,
+        mimeType: r.mimeType, data: r.data,
+      }).then(function (res) {
+        return { receiptId: res.receiptId, state: normState(res.state) };
+      });
     },
   };
 }
@@ -206,9 +239,23 @@ function DemoBackend() {
       if (!Number.isInteger(ex.amountCents) || ex.amountCents <= 0) {
         return Promise.reject(new Error('amount must be positive'));
       }
+      var shares = null;
+      if (ex.shares) {
+        shares = {};
+        var sum = 0;
+        var ids = Object.keys(ex.shares);
+        for (var i = 0; i < ids.length; i++) {
+          var n = Number(ex.shares[ids[i]]);
+          if (!Number.isInteger(n) || n < 0) return Promise.reject(new Error('shares must be non-negative integer cents'));
+          shares[String(ids[i])] = n;
+          sum += n;
+        }
+        if (sum !== ex.amountCents) return Promise.reject(new Error('shares must add up to the total amount'));
+      }
       var e = {
         id: ex.id || uid('e'), groupId: ex.groupId, description: String(ex.description).slice(0, 120) || 'Expense',
-        amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong.map(String), date: ex.date,
+        amountCents: ex.amountCents, paidBy: ex.paidBy, splitAmong: ex.splitAmong.map(String),
+        shares: shares, receiptId: '', date: ex.date,
       };
       s.expenses.push(e); save();
       return Promise.resolve({ expense: clone(e), state: clone(s) });
@@ -234,6 +281,14 @@ function DemoBackend() {
       s.settlements = s.settlements.filter(function (x) { return x.id !== id; });
       save();
       return Promise.resolve(snap(s));
+    },
+    uploadReceipt: function (r) {
+      var s = load();
+      var ex = s.expenses.filter(function (e) { return e.id === r.expenseId; })[0];
+      if (!ex) return Promise.reject(new Error('unknown expense'));
+      ex.receiptId = 'demo-receipt';
+      save();
+      return Promise.resolve({ receiptId: 'demo-receipt', state: clone(s) });
     },
     reset: function () { store = seed(); save(); return Promise.resolve(); },
   };

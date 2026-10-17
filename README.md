@@ -18,8 +18,20 @@ friend's browser ──▶ static web page (frontend/)
 ```
 
 - All money is stored as **integer cents** — no float rounding bugs.
-- Splits are equal shares; leftover cents go to the first person in the split.
-- Balances collapse into the fewest payments with a greedy min-cash-flow pass.
+- Splits are equal shares by default, or **custom amounts** per person
+  (they must add up to the total); leftover cents go to the first person in
+  an equal split.
+- The add-expense form shows a **live split preview** before you save.
+- **Receipt photos** can be attached to an expense — they're downscaled in
+  the browser, stored in a "Split Expenses Receipts" folder in the sheet
+  owner's Google Drive, and shared as viewable links (anyone-with-link).
+- Balances collapse into the fewest payments with a greedy min-cash-flow pass;
+  every suggestion is tappable to prefill the "record a payment" form.
+- Members get colored **avatar initials**, unique within each group
+  ("AJ", "AJ2"… when initials collide).
+- The UI updates **optimistically** — buttons respond instantly while the
+  save happens in the background (a spinner in the header shows sync state),
+  so double-taps can't create duplicates.
 - The Apps Script uses `LockService` so two friends saving at once can't corrupt a row.
 - The frontend sends POST bodies as `text/plain` (no `Content-Type` header) so the
   browser skips the CORS preflight that Apps Script web apps can't answer.
@@ -38,8 +50,10 @@ splitwise/
 │   ├── api.js           # SheetsBackend + DemoBackend adapters
 │   └── app.js           # UI
 └── test/
-    ├── balances.test.js # unit tests: node test/balances.test.js
-    └── smoke.js         # end-to-end flow vs demo backend: node test/smoke.js
+    ├── balances.test.js      # unit tests: node test/balances.test.js
+    ├── gas.test.js           # backend: runs real Code.gs against sheet/Drive stubs
+    ├── sheets-adapter.test.js# adapter regression (string split_among, state returns)
+    └── smoke.js              # end-to-end flow vs demo backend: node test/smoke.js
 ```
 
 ## Setup (about 15 minutes)
@@ -50,7 +64,11 @@ splitwise/
   paste in the full contents of `backend/Code.gs`, save.
 - In the editor's function dropdown pick **`bootstrap`** and hit Run.
   Google will ask you to authorize the script (it needs permission to edit
-  *this spreadsheet only*). This creates the four tabs with headers.
+  *this spreadsheet only* — plus Google Drive if you want receipt uploads).
+  This creates the four tabs with headers.
+  > Already have a sheet from an older version? Just run `bootstrap` again:
+  > it adds any new columns (e.g. `shares`, `receipt_id`) without touching
+  > your existing data.
 
 **2. Deploy the API**
 - **Deploy → New deployment → Web app**
@@ -81,7 +99,7 @@ splitwise/
 |---|---|
 | Groups | id, name, created_at |
 | Members | id, group_id, name |
-| Expenses | id, group_id, description, amount_cents, paid_by, split_among (JSON), date, created_at |
+| Expenses | id, group_id, description, amount_cents, paid_by, split_among (JSON), shares (JSON, optional uneven split), receipt_id (Drive file id), date, created_at |
 | Settlements | id, group_id, from_id, to_id, amount_cents, date, created_at |
 
 You can read (and fix!) everything directly in the sheet — it's your database.

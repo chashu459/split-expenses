@@ -5,4 +5,4 @@
  * Leave it empty to run in DEMO MODE: the app works fully, but data stays in
  * this browser (localStorage) and is not shared with friends.
  */
-const API_URL = "https://script.google.com/macros/s/AKfycbx0BcvC4CIns9XrsB3h-v5CIfEVnZmQ5kDwxnsZeLECayH9haaxZxv4p3f_TdHtzEQW/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbyJcojFTzpOi2x7PiU-aZHeQ3NTJP3ZksxjXXF4WreE-OmoZZWH9ivMoLM3Iwj2mfPn/exec";

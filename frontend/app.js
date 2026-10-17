@@ -26,6 +26,7 @@
     return (isFinite(n) && n > 0) ? n : null;
   }
 
+  function fmtDate(d) { return String(d || '').slice(0, 10); } // date only, never datetime
   function todayISO() { return new Date().toISOString().slice(0, 10); }
 
   function uuid() {
@@ -36,29 +37,75 @@
   }
 
   /* Optimistic mutations: apply locally and render instantly, then sync with
-   * the server through a serial queue. Each link sends its request and applies
-   * the fresh state the server returns; on failure we toast and reload server
-   * truth to roll back. Serial order means a later optimistic change is never
-   * clobbered by an earlier request's refresh. */
+   * the server through a serial queue. pendingOps drives the sync spinner in
+   * the header so it's always clear something is still saving. On failure we
+   * toast and reload server truth to roll back. */
   var opChain = Promise.resolve();
+  var pendingOps = 0;
   function mutate(label, optimisticFn, requestFn) {
+    pendingOps++;
     try { optimisticFn(); } catch (_) {}
     render();
     opChain = opChain.then(function () {
       return Promise.resolve()
         .then(requestFn)
         .then(function (out) {
+          pendingOps--;
           state = out.state;
-          render();
+          renderPage();
         })
         .catch(function (err) {
+          pendingOps--;
           toast(label + ' failed (' + (err && err.message || err) + ') — reloading.', true);
           return backend.getState().then(function (s) {
             state = s;
-            render();
-          }).catch(function () {});
+            renderPage();
+          }).catch(function () { renderPage(); });
         });
     });
+  }
+  function syncDot() {
+    return '<span class="syncdot' + (pendingOps > 0 ? '' : ' hidden') +
+      '" title="Syncing…">⟳</span>';
+  }
+
+  /* ---------- member avatars ---------- */
+
+  var AVATAR_COLORS = ['#e11d48', '#d97706', '#059669', '#0284c7', '#7c3aed',
+                       '#db2777', '#65a30d', '#0d9488', '#4f46e5', '#be123c'];
+
+  function hashStr(s) {
+    var h = 0;
+    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return Math.abs(h);
+  }
+
+  function baseInitials(name) {
+    var parts = String(name).trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return '?';
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+  }
+
+  // Unique per group: "AJ", and "AJ2", "AJ3"… when initials collide.
+  function avatarLabel(member, members) {
+    var base = baseInitials(member.name);
+    var same = (members || []).filter(function (m) { return baseInitials(m.name) === base; });
+    if (same.length < 2) return base;
+    var idx = same.map(function (m) { return m.id; }).indexOf(member.id);
+    return idx <= 0 ? base : base + (idx + 1);
+  }
+
+  function avatarHTML(member, members) {
+    if (!member) return '';
+    var color = AVATAR_COLORS[hashStr(String(member.id)) % AVATAR_COLORS.length];
+    return '<span class="avatar" style="background:' + color + '" title="' +
+      esc(member.name) + '">' + esc(avatarLabel(member, members)) + '</span>';
+  }
+
+  function receiptURL(e) {
+    if (!e.receiptId || e.receiptId === 'demo-receipt') return null;
+    return 'https://drive.google.com/file/d/' + encodeURIComponent(e.receiptId) + '/view';
   }
 
   function membersOf(groupId) {
@@ -74,8 +121,11 @@
       .filter(function (s) { return s.groupId === groupId; })
       .sort(function (a, b) { return (b.date || '').localeCompare(a.date || '') || (b.id || '').localeCompare(a.id || ''); });
   }
+  function memberById(id) {
+    return state.members.filter(function (x) { return x.id === id; })[0] || null;
+  }
   function memberName(id) {
-    var m = state.members.filter(function (x) { return x.id === id; })[0];
+    var m = memberById(id);
     return m ? m.name : '?';
   }
   function myId(groupId) { return meByGroup[groupId] || null; }
@@ -119,9 +169,15 @@
 
   function render() {
     closeModal();
+    renderPage();
+    window.scrollTo(0, 0);
+  }
+
+  // Re-render the page behind any open modal (used when a background sync
+  // finishes — never steals a half-filled form).
+  function renderPage() {
     if (view.name === 'group') renderGroup();
     else renderGroups();
-    window.scrollTo(0, 0);
   }
 
   function demoBanner() {
@@ -134,7 +190,9 @@
     var cards = state.groups.map(function (g) {
       var ms = membersOf(g.id);
       var nExp = expensesOf(g.id).length;
+      var faces = ms.slice(0, 5).map(function (m) { return avatarHTML(m, ms); }).join('');
       return '<button class="group-card" data-group="' + esc(g.id) + '">' +
+        '<span class="group-faces">' + faces + '</span>' +
         '<span class="group-name">' + esc(g.name) + '</span>' +
         '<span class="group-meta">' + ms.length + ' people · ' + nExp + ' expenses</span>' +
         '</button>';
@@ -142,7 +200,7 @@
 
     $('#app').innerHTML =
       demoBanner() +
-      '<header class="top"><h1>Split it</h1></header>' +
+      '<header class="top"><h1>Split it</h1>' + syncDot() + '</header>' +
       '<main class="wrap">' +
         (cards || '<p class="empty">No groups yet. Start one below.</p>') +
         '<button class="btn primary block" id="new-group">+ New group</button>' +
@@ -176,7 +234,7 @@
       demoBanner() +
       '<header class="top sub">' +
         '<button class="back" id="back">‹</button>' +
-        '<h1>' + esc(g.name) + '</h1>' +
+        '<h1>' + esc(g.name) + '</h1>' + syncDot() +
         '<button class="icon-btn" id="add-member" title="Add person">＋</button>' +
       '</header>' +
       '<main class="wrap">' + mePicker +
@@ -215,13 +273,15 @@
       var text = b > 0 ? 'is owed ' + formatMoney(b)
                : b < 0 ? 'owes ' + formatMoney(-b)
                : 'settled up';
-      return '<div class="bal-row"><span>' + label + '</span>' +
+      return '<div class="bal-row">' + avatarHTML(m, ms) + '<span>' + label + '</span>' +
         '<span class="' + cls + '">' + text + '</span></div>';
     }).join('');
 
     var pays = simplified.map(function (p) {
-      return '<div class="pay-row"><span><b>' + esc(displayName(g.id, p.from)) +
-        '</b> pays <b>' + esc(displayName(g.id, p.to)) + '</b></span>' +
+      var from = memberById(p.from), to = memberById(p.to);
+      return '<div class="pay-row"><span>' + avatarHTML(from, ms) +
+        '<b>' + esc(displayName(g.id, p.from)) + '</b> pays <b>' +
+        esc(displayName(g.id, p.to)) + '</b>' + avatarHTML(to, ms) + '</span>' +
         '<span class="amt">' + formatMoney(p.amountCents) + '</span></div>';
     }).join('');
 
@@ -236,10 +296,16 @@
     var ex = expensesOf(g.id), st = settlementsOf(g.id);
     var items = ex.map(function (e) {
       var who = e.splitAmong.map(function (id) { return esc(displayName(g.id, id)); }).join(', ');
-      return '<div class="exp-row">' +
-        '<div class="exp-main"><span class="exp-desc">' + esc(e.description) + '</span>' +
-        '<span class="exp-sub">' + esc(e.date || '') + ' · ' + esc(displayName(g.id, e.paidBy)) +
-        ' paid · split: ' + who + '</span></div>' +
+      var splitNote = e.shares ? ' · custom split' : '';
+      var payer = memberById(e.paidBy);
+      var rurl = receiptURL(e);
+      var receipt = rurl
+        ? ' <a class="receipt" href="' + rurl + '" target="_blank" rel="noopener" title="View receipt">🧾</a>'
+        : (e.receiptId ? ' <span class="receipt" title="Receipt attached">🧾</span>' : '');
+      return '<div class="exp-row">' + avatarHTML(payer, ms) +
+        '<div class="exp-main"><span class="exp-desc">' + esc(e.description) + receipt + '</span>' +
+        '<span class="exp-sub">' + esc(fmtDate(e.date)) + ' · ' + esc(displayName(g.id, e.paidBy)) +
+        ' paid · split: ' + who + splitNote + '</span></div>' +
         '<div class="exp-right"><span class="amt">' + formatMoney(e.amountCents) + '</span>' +
         '<button class="del" data-del-exp="' + esc(e.id) + '" title="Delete">×</button></div>' +
         '</div>';
@@ -249,7 +315,7 @@
       return '<div class="exp-row settle">' +
         '<div class="exp-main"><span class="exp-desc">💸 ' + esc(displayName(g.id, s.fromId)) +
         ' → ' + esc(displayName(g.id, s.toId)) + '</span>' +
-        '<span class="exp-sub">' + esc(s.date || '') + ' · payment recorded</span></div>' +
+        '<span class="exp-sub">' + esc(fmtDate(s.date)) + ' · payment recorded</span></div>' +
         '<div class="exp-right"><span class="amt">' + formatMoney(s.amountCents) + '</span>' +
         '<button class="del" data-del-settle="' + esc(s.id) + '" title="Delete">×</button></div>' +
         '</div>';
@@ -319,16 +385,57 @@
     });
   }
 
+  /* Downscale a receipt photo client-side so uploads stay small. */
+  function processReceipt(file) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var max = 1600;
+          var scale = Math.min(1, max / Math.max(img.width, img.height));
+          var canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob(function (blob) {
+            if (blob) resolve(blob);
+            else reject(new Error('could not process image'));
+          }, 'image/jpeg', 0.8);
+        } catch (e) { reject(e); }
+        if (img.src && img.src.indexOf('blob:') === 0) URL.revokeObjectURL(img.src);
+      };
+      img.onerror = function () { reject(new Error('could not read image')); };
+      img.src = URL.createObjectURL(file);
+    }).then(function (blob) {
+      return new Promise(function (resolve, reject) {
+        var r = new FileReader();
+        r.onload = function () { resolve(String(r.result).split(',')[1]); };
+        r.onerror = function () { reject(new Error('could not read image')); };
+        r.readAsDataURL(blob);
+      });
+    });
+  }
+
   function addExpenseModal(g, ms) {
     if (ms.length < 1) { toast('Add people to the group first', true); return; }
     var me = myId(g.id);
+    var splitMode = 'equal';
+    var receiptFile = null;
+
     var paidOpts = ms.map(function (m) {
       return '<option value="' + esc(m.id) + '"' + (m.id === me ? ' selected' : '') + '>' +
         esc(m.name) + '</option>';
     }).join('');
-    var checks = ms.map(function (m) {
-      return '<label class="check"><input type="checkbox" data-split="' + esc(m.id) + '" checked> ' +
+    var equalChecks = ms.map(function (m) {
+      return '<label class="check">' + avatarHTML(m, ms) +
+        '<input type="checkbox" data-split="' + esc(m.id) + '" checked> ' +
         esc(m.name) + '</label>';
+    }).join('');
+    var customRows = ms.map(function (m) {
+      return '<div class="crow"><label class="check">' + avatarHTML(m, ms) +
+        '<input type="checkbox" data-csplit="' + esc(m.id) + '" checked></label>' +
+        '<span class="crow-name">' + esc(m.name) + '</span>' +
+        '<input class="crow-amt" data-camt="' + esc(m.id) + '" inputmode="decimal" placeholder="0.00"></div>';
     }).join('');
 
     openModal('<h2>Add expense</h2>' +
@@ -338,29 +445,159 @@
       '<label>Date<input id="f-date" type="date" value="' + todayISO() + '"></label>' +
       '</div>' +
       '<label>Paid by<select id="f-paid">' + paidOpts + '</select></label>' +
-      '<label>Split equally between</label><div class="checks">' + checks + '</div>' +
+      '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>' +
+      '<div class="seg" id="split-mode">' +
+        '<button data-mode="equal" class="active">Equal split</button>' +
+        '<button data-mode="custom">Custom amounts</button>' +
+      '</div>' +
+      '<div id="split-equal"><div class="checks">' + equalChecks + '</div></div>' +
+      '<div id="split-custom" class="hidden">' + customRows + '</div>' +
+      '<div id="split-preview" class="preview"></div>' +
       '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
       '<button class="btn primary" id="m-ok">Add</button></div>');
+
+    function checkedEqualIds() {
+      return $all('#split-equal [data-split]').filter(function (c) { return c.checked; })
+        .map(function (c) { return c.getAttribute('data-split'); });
+    }
+    function customShares() {
+      // {id: cents} for checked rows, or null when any amount is invalid
+      var out = {}, ok = true;
+      $all('#split-custom .crow').forEach(function (row) {
+        var cb = row.querySelector('[data-csplit]');
+        if (!cb.checked) return;
+        var cents = dollarsToCents(row.querySelector('[data-camt]').value);
+        if (cents === null) { ok = false; return; }
+        out[cb.getAttribute('data-csplit')] = cents;
+      });
+      return ok ? out : null;
+    }
+    function previewRows(parts, ids) {
+      return ids.map(function (id) {
+        var m = memberById(id);
+        return '<div class="pv-row">' + avatarHTML(m, ms) +
+          '<span>' + esc(m ? m.name : '?') + '</span>' +
+          '<span class="amt">' + formatMoney(parts[id] || 0) + '</span></div>';
+      }).join('');
+    }
+    function renderPreview() {
+      var box = $('#split-preview');
+      var cents = dollarsToCents($('#f-amount').value);
+      if (!cents) {
+        box.innerHTML = '<span class="muted">Enter an amount to preview the split.</span>';
+        return;
+      }
+      if (splitMode === 'equal') {
+        var ids = checkedEqualIds();
+        if (!ids.length) {
+          box.innerHTML = '<span class="muted">Pick who to split with.</span>';
+          return;
+        }
+        var parts = owedSplit({ amountCents: cents, splitAmong: ids, shares: null });
+        box.innerHTML = '<div class="pv-title">Split preview</div>' + previewRows(parts, ids);
+      } else {
+        var shares = customShares();
+        if (shares === null) {
+          box.innerHTML = '<span class="muted">Enter each person\'s share.</span>';
+          return;
+        }
+        var sids = Object.keys(shares);
+        if (!sids.length) {
+          box.innerHTML = '<span class="muted">Pick who to split with.</span>';
+          return;
+        }
+        var sum = sids.reduce(function (n, id) { return n + shares[id]; }, 0);
+        var diff = cents - sum;
+        var note = diff === 0
+          ? '<div class="pv-total ok">✓ Adds up to ' + formatMoney(cents) + '</div>'
+          : '<div class="pv-total bad">' + (diff > 0
+              ? formatMoney(diff) + ' left to allocate'
+              : 'Over by ' + formatMoney(-diff)) + '</div>';
+        box.innerHTML = '<div class="pv-title">Split preview</div>' +
+          previewRows(shares, sids) + note;
+      }
+    }
+
+    // prefill custom amounts with an equal split whenever inputs change
+    function prefillCustom() {
+      var cents = dollarsToCents($('#f-amount').value);
+      var ids = checkedEqualIds();
+      if (!cents || !ids.length) return;
+      var parts = owedSplit({ amountCents: cents, splitAmong: ids, shares: null });
+      $all('#split-custom [data-camt]').forEach(function (inp) {
+        var id = inp.getAttribute('data-camt');
+        inp.value = parts[id] !== undefined ? (parts[id] / 100).toFixed(2) : '';
+      });
+    }
+
+    $('#split-mode').addEventListener('click', function (ev) {
+      var btn = ev.target.closest('[data-mode]');
+      if (!btn) return;
+      splitMode = btn.getAttribute('data-mode');
+      $all('#split-mode button').forEach(function (b) {
+        b.classList.toggle('active', b === btn);
+      });
+      $('#split-equal').classList.toggle('hidden', splitMode !== 'equal');
+      $('#split-custom').classList.toggle('hidden', splitMode !== 'custom');
+      if (splitMode === 'custom') prefillCustom();
+      renderPreview();
+    });
+    $('#f-amount').addEventListener('input', function () {
+      if (splitMode === 'custom') prefillCustom();
+      renderPreview();
+    });
+    $('#overlay').addEventListener('change', renderPreview);
+    $('#overlay').addEventListener('input', function (ev) {
+      if (ev.target.id === 'f-amount' || ev.target.hasAttribute('data-camt')) renderPreview();
+    });
+    $('#f-receipt').addEventListener('change', function (ev) {
+      receiptFile = (ev.target.files && ev.target.files[0]) || null;
+    });
+    renderPreview();
 
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
       var cents = dollarsToCents($('#f-amount').value);
       if (cents === null) { toast('Enter a valid amount', true); return; }
-      var split = $all('[data-split]').filter(function (c) { return c.checked; })
-        .map(function (c) { return c.getAttribute('data-split'); });
-      if (!split.length) { toast('Pick at least one person to split with', true); return; }
+      var split, shares = null;
+      if (splitMode === 'equal') {
+        split = checkedEqualIds();
+        if (!split.length) { toast('Pick at least one person to split with', true); return; }
+      } else {
+        shares = customShares();
+        if (!shares || !Object.keys(shares).length) {
+          toast('Enter a valid amount for each person', true);
+          return;
+        }
+        var sum = Object.keys(shares).reduce(function (n, id) { return n + shares[id]; }, 0);
+        if (sum !== cents) { toast('Shares must add up to ' + formatMoney(cents), true); return; }
+        split = Object.keys(shares);
+      }
       var ex = {
         id: uuid(), groupId: g.id,
         description: $('#f-desc').value.trim() || 'Expense',
         amountCents: cents,
         paidBy: $('#f-paid').value,
         splitAmong: split,
+        shares: shares,
+        receiptId: '',
         date: $('#f-date').value || todayISO(),
       };
+      var file = receiptFile;
       view.tab = 'expenses';
       mutate('Add expense',
         function () { state.expenses.push(ex); },
-        function () { return backend.addExpense(ex); });
+        function () {
+          return backend.addExpense(ex).then(function (out) {
+            if (!file) return out;
+            return processReceipt(file).then(function (b64) {
+              return backend.uploadReceipt({
+                expenseId: ex.id, name: file.name || 'receipt.jpg',
+                mimeType: 'image/jpeg', data: b64,
+              });
+            });
+          });
+        });
     });
   }
 
@@ -376,15 +613,19 @@
       }).join('');
     }
 
-    var sug = '';
-    if (simplified.length) {
-      var p0 = simplified[0];
-      sug = '<button class="btn block" id="use-suggested">Use suggested: ' +
-        esc(displayName(g.id, p0.from)) + ' → ' + esc(displayName(g.id, p0.to)) +
-        ' ' + formatMoney(p0.amountCents) + '</button>';
-    }
+    var sugList = simplified.map(function (p, i) {
+      return '<button class="sug-row" data-sug="' + i + '">' +
+        '<span>' + avatarHTML(memberById(p.from), ms) +
+        '<b>' + esc(displayName(g.id, p.from)) + '</b> → <b>' +
+        esc(displayName(g.id, p.to)) + '</b>' +
+        avatarHTML(memberById(p.to), ms) + '</span>' +
+        '<span class="amt">' + formatMoney(p.amountCents) + '</span></button>';
+    }).join('');
 
-    openModal('<h2>Record a payment</h2>' + sug +
+    openModal('<h2>Record a payment</h2>' +
+      (sugList
+        ? '<div class="sug-title">Tap a suggestion to fill it in:</div><div class="sug-list">' + sugList + '</div>'
+        : '<p class="empty">Everyone is settled up 🎉</p>') +
       '<div class="row2"><label>From<select id="f-from">' + personOpts(me) + '</select></label>' +
       '<label>To<select id="f-to">' + personOpts() + '</select></label></div>' +
       '<div class="row2"><label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"></label>' +
@@ -393,11 +634,13 @@
       '<button class="btn primary" id="m-ok">Record</button></div>');
 
     $('#m-cancel').addEventListener('click', closeModal);
-    var useSug = $('#use-suggested');
-    if (useSug) useSug.addEventListener('click', function () {
-      $('#f-from').value = p0.from;
-      $('#f-to').value = p0.to;
-      $('#f-amount').value = (p0.amountCents / 100).toFixed(2);
+    $all('[data-sug]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var p = simplified[Number(el.getAttribute('data-sug'))];
+        $('#f-from').value = p.from;
+        $('#f-to').value = p.to;
+        $('#f-amount').value = (p.amountCents / 100).toFixed(2);
+      });
     });
     $('#m-ok').addEventListener('click', function () {
       var cents = dollarsToCents($('#f-amount').value);

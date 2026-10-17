@@ -75,5 +75,23 @@ var B = require('../frontend/balances.js');
   var del = await backend.deleteExpense('e1');
   assert.strictEqual(del.state.expenses.filter(function (e) { return e.groupId === g.id; }).length, 1);
 
+  // uneven split: shares drive balances, not equal division
+  var g2 = (await backend.createGroup({ id: 'g2', name: 'Uneven' })).group;
+  var a1 = (await backend.addMember({ id: 'a1', groupId: g2.id, name: 'Ann' })).member;
+  var b1 = (await backend.addMember({ id: 'b1', groupId: g2.id, name: 'Bo' })).member;
+  var ue = await backend.addExpense({
+    id: 'e9', groupId: g2.id, description: 'Uneven dinner', amountCents: 1000,
+    paidBy: a1.id, splitAmong: [a1.id, b1.id], shares: { a1: 700, b1: 300 }, date: '2026-10-17',
+  });
+  assert.deepStrictEqual(ue.expense.shares, { a1: 700, b1: 300 });
+  s = await backend.getState();
+  var bal2 = B.computeBalances([a1, b1],
+    s.expenses.filter(function (e) { return e.groupId === g2.id; }), []);
+  assert.deepStrictEqual(bal2, { a1: 300, b1: -300 });
+  await assert.rejects(backend.addExpense({
+    id: 'e10', groupId: g2.id, description: 'Bad', amountCents: 1000,
+    paidBy: a1.id, splitAmong: [a1.id, b1.id], shares: { a1: 700, b1: 200 }, date: '2026-10-17',
+  }), /add up/);
+
   console.log('smoke test passed: full flow works (group -> members -> expenses -> simplify -> settle -> zero)');
 })().catch(function (e) { console.error('SMOKE FAIL:', e); process.exitCode = 1; });

@@ -7,19 +7,39 @@
  * Loaded via <script> in the browser and via require() in node tests.
  */
 
+/**
+ * Per-person owed amounts for one expense, in cents: {memberId: cents}.
+ * Uses explicit uneven `shares` when present, otherwise splits equally
+ * (leftover cents go to the first person).
+ */
+function owedSplit(e) {
+  var shares = e.shares;
+  if (shares && typeof shares === 'object' && Object.keys(shares).length) {
+    var out = {};
+    Object.keys(shares).forEach(function (k) { out[String(k)] = Number(shares[k]) || 0; });
+    return out;
+  }
+  var ids = (e.splitAmong || e.split_among || []).map(String);
+  var eq = {};
+  if (!ids.length) return eq;
+  var share = Math.floor(e.amountCents / ids.length);
+  var remainder = e.amountCents - share * ids.length; // 0..n-1 leftover cents
+  ids.forEach(function (mid, i) { eq[mid] = share + (i === 0 ? remainder : 0); });
+  return eq;
+}
+
 function computeBalances(members, expenses, settlements) {
   var bal = {};
   members.forEach(function (m) { bal[String(m.id)] = 0; });
 
   expenses.forEach(function (e) {
-    var ids = (e.splitAmong || e.split_among || []).map(String);
+    var owed = owedSplit(e);
+    var ids = Object.keys(owed);
     if (!ids.length) return;
-    var share = Math.floor(e.amountCents / ids.length);
-    var remainder = e.amountCents - share * ids.length; // 0..n-1 leftover cents
     var paidBy = String(e.paidBy || e.paid_by);
     bal[paidBy] = (bal[paidBy] || 0) + e.amountCents;
-    ids.forEach(function (mid, i) {
-      bal[mid] = (bal[mid] || 0) - share - (i === 0 ? remainder : 0);
+    ids.forEach(function (mid) {
+      bal[mid] = (bal[mid] || 0) - owed[mid];
     });
   });
 
@@ -70,5 +90,5 @@ function formatMoney(cents) {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { computeBalances: computeBalances, simplifyDebts: simplifyDebts, formatMoney: formatMoney };
+  module.exports = { computeBalances: computeBalances, simplifyDebts: simplifyDebts, formatMoney: formatMoney, owedSplit: owedSplit };
 }

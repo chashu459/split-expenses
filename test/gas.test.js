@@ -16,7 +16,23 @@ function makeSheet(header) {
     appendRow(arr) { rows.push(arr.slice()); },
     deleteRow(n) { rows.splice(n - 1, 1); },
     getLastRow() { return rows.length; },
+    getLastColumn() { return rows[0].length; },
+    getRange(r, c, nr, nc) {
+      return {
+        getValues: () => {
+          const out = [];
+          for (let i = 0; i < (nr || 1); i++) {
+            const row = [];
+            for (let j = 0; j < (nc || 1); j++) row.push(rows[r - 1 + i][c - 1 + j]);
+            out.push(row);
+          }
+          return out;
+        },
+        setValue: (v) => { rows[r - 1][c - 1] = v; },
+      };
+    },
     setFrozenRows() {},
+    _rows: rows,
   };
 }
 const sheets = {
@@ -35,7 +51,37 @@ global.LockService = {
   getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }),
 };
 let uuidN = 0;
-global.Utilities = { getUuid: () => 'uuid-' + (++uuidN) };
+global.Utilities = {
+  getUuid: () => 'uuid-' + (++uuidN),
+  base64Decode: (s) => Buffer.from(s, 'base64'),
+  newBlob: (bytes, mime, name) => ({ bytes, mimeType: mime, name }),
+  formatDate: (d) => d.toISOString().slice(0, 10),
+};
+global.Session = { getScriptTimeZone: () => 'America/Los_Angeles' };
+const driveFiles = {};
+global.DriveApp = {
+  Access: { ANYONE_WITH_LINK: 'ANYONE_WITH_LINK' },
+  Permission: { VIEW: 'VIEW' },
+  _folders: {},
+  getFoldersByName(name) {
+    const f = this._folders[name] || null;
+    let used = false;
+    return { hasNext: () => !used && !!f, next: () => { used = true; return f; } };
+  },
+  createFolder(name) {
+    const folder = {
+      createFile: (blob) => {
+        const id = 'file-' + Math.random().toString(36).slice(2, 10);
+        const file = { getId: () => id, setSharing: () => {}, _blob: blob, _shared: [] };
+        file.setSharing = (a, p) => { file._shared.push([a, p]); };
+        driveFiles[id] = file;
+        return file;
+      },
+    };
+    this._folders[name] = folder;
+    return folder;
+  },
+};
 global.ContentService = {
   createTextOutput: (s) => ({ setMimeType: () => ({ getContent: () => s }) }),
   MimeType: { JSON: 'json' },
@@ -43,7 +89,9 @@ global.ContentService = {
 
 /* ---------- load the real Code.gs ---------- */
 const code = fs.readFileSync(__dirname + '/../backend/Code.gs', 'utf8');
-eval(code + '\n;global.__doPost = doPost; global.__doGet = doGet;');
+eval(code + '\n;global.__doPost = doPost; global.__doGet = doGet; global.__bootstrap = bootstrap;');
+// simulate a sheet created by an older bootstrap(): columns added by migration
+global.__bootstrap();
 
 function post(body) {
   readCount = 0;
@@ -157,6 +205,92 @@ t('doGet state shape', () => {
   assert.ok(reads <= 4, 'expected single-pass reads, got ' + reads);
   const bad = get('nope');
   assert.strictEqual(bad.res.ok, false);
+});
+
+t('uneven shares: balances follow shares, not equal split', () => {
+  const B = require('../frontend/balances.js');
+  const { res } = post({
+    action: 'addExpense', id: 'e-share', groupId: 'g1', description: 'Uneven',
+    amountCents: 9000, paidBy: 'm1', splitAmong: ['m1', 'm2'],
+    shares: { m1: 7000, m2: 2000 }, date: '2026-10-17',
+  });
+  assert.strictEqual(res.ok, true);
+  assert.deepStrictEqual(res.expense.shares, { m1: 7000, m2: 2000 });
+  const members = [{ id: 'm1' }, { id: 'm2' }];
+  const expenses = [{ amountCents: 9000, paidBy: 'm1', splitAmong: ['m1', 'm2'], shares: { m1: 7000, m2: 2000 } }];
+  assert.deepStrictEqual(B.computeBalances(members, expenses, []), { m1: 2000, m2: -2000 });
+});
+
+t('shares must add up to the total', () => {
+  const { res } = post({
+    action: 'addExpense', id: 'e-badshare', groupId: 'g1', description: 'Bad',
+    amountCents: 9000, paidBy: 'm1', splitAmong: ['m1', 'm2'],
+    shares: { m1: 7000, m2: 1000 }, date: '2026-10-17',
+  });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /add up to the total/);
+});
+
+t('shares with unknown member rejected', () => {
+  const { res } = post({
+    action: 'addExpense', id: 'e-badshare2', groupId: 'g1', description: 'Bad',
+    amountCents: 9000, paidBy: 'm1', splitAmong: ['m1', 'm2'],
+    shares: { m1: 4500, zzz: 4500 }, date: '2026-10-17',
+  });
+  assert.strictEqual(res.ok, false);
+  assert.match(res.error, /member not in group/);
+});
+
+t('uploadReceipt stores file id on the expense', () => {
+  const data = Buffer.from('fake-image-bytes').toString('base64');
+  const { res } = post({
+    action: 'uploadReceipt', expenseId: 'e-share', name: 'r.jpg',
+    mimeType: 'image/jpeg', data,
+  });
+  assert.strictEqual(res.ok, true);
+  assert.ok(res.receiptId.startsWith('file-'));
+  const file = driveFiles[res.receiptId];
+  assert.ok(file, 'file created in Drive stub');
+  assert.deepStrictEqual(file._shared, [['ANYONE_WITH_LINK', 'VIEW']]);
+  assert.strictEqual(res.state.expenses.find((e) => e.id === 'e-share').receipt_id, res.receiptId);
+  // sheet row updated too
+  const rows = sheets.expenses.getDataRange().getValues();
+  const head = rows[0].map(String);
+  const ridx = head.indexOf('receipt_id');
+  const row = rows.find((r) => String(r[0]) === 'e-share');
+  assert.strictEqual(String(row[ridx]), res.receiptId);
+});
+
+t('uploadReceipt rejects unknown expense and oversized files', () => {
+  const bad = post({ action: 'uploadReceipt', expenseId: 'nope', data: 'eA==' });
+  assert.strictEqual(bad.res.ok, false);
+  const big = post({ action: 'uploadReceipt', expenseId: 'e-share', data: Buffer.alloc(16 * 1024 * 1024).toString('base64') });
+  assert.strictEqual(big.res.ok, false);
+  assert.match(big.res.error, /too large/);
+});
+
+t('date normalization: Date objects from Sheets become YYYY-MM-DD', () => {
+  sheets.settlements.appendRow(['s-date', 'g1', 'm1', 'm2', 100,
+    new Date(Date.UTC(2026, 9, 17, 8, 0, 0)), '2026-10-17T00:00:00.000Z']);
+  const { res } = get('state');
+  const s = res.state.settlements.find((x) => x.id === 's-date');
+  assert.strictEqual(s.date, '2026-10-17');
+});
+
+t('bootstrap adds missing columns to an existing sheet', () => {
+  // simulate a pre-feature expenses tab: old 8-column header + one data row
+  sheets.expenses._rows.length = 0;
+  sheets.expenses._rows.push(['id', 'group_id', 'description', 'amount_cents', 'paid_by', 'split_among', 'date', 'created_at']);
+  sheets.expenses._rows.push(['e-old', 'g1', 'Old', 500, 'm1', JSON.stringify(['m1']), '2026-10-16', 't']);
+  global.__bootstrap();
+  const head = sheets.expenses.getDataRange().getValues()[0].map(String);
+  assert.ok(head.includes('shares'), 'shares column added');
+  assert.ok(head.includes('receipt_id'), 'receipt_id column added');
+  const { res } = get('state');
+  const old = res.state.expenses.find((e) => e.id === 'e-old');
+  assert.strictEqual(old.description, 'Old');
+  assert.strictEqual(old.shares, null);
+  assert.strictEqual(old.receipt_id, '');
 });
 
 console.log(passed + ' gas tests passed');
