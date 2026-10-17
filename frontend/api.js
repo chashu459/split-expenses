@@ -42,6 +42,15 @@ function SheetsBackend(url) {
     };
   }
 
+  function asArray(v) {
+    if (Array.isArray(v)) return v;
+    if (typeof v === 'string') {
+      try { var p = JSON.parse(v); return Array.isArray(p) ? p : []; }
+      catch (_) { return []; }
+    }
+    return [];
+  }
+
   function normExpense(e) {
     return {
       id: String(e.id || e.expense && e.expense.id),
@@ -49,7 +58,7 @@ function SheetsBackend(url) {
       description: e.description,
       amountCents: Number(e.amount_cents !== undefined ? e.amount_cents : e.amountCents),
       paidBy: String(e.paid_by !== undefined ? e.paid_by : e.paidBy),
-      splitAmong: (e.split_among !== undefined ? e.split_among : e.splitAmong).map(String),
+      splitAmong: asArray(e.split_among !== undefined ? e.split_among : e.splitAmong).map(String),
       date: e.date,
     };
   }
