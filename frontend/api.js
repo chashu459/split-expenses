@@ -5,6 +5,7 @@
  *
  *   getState()      -> { groups, members, expenses, settlements }
  *   createGroup({id?, name})                       -> { group, state }
+ *   updateGroup(id, name)                           -> { group, state }
  *   addMember({id?, groupId, name, venmo?})         -> { member, state }
  *   addMembers(groupId, [{id?, name, venmo?}])      -> { members, skipped, state }
  *     Batch add; names already in the group are skipped, not errors.
@@ -146,6 +147,11 @@ function SheetsBackend(url) {
     },
     createGroup: function (g) {
       return post({ action: 'createGroup', id: g.id, name: g.name }).then(function (r) {
+        return withState(r, 'group', normGroup);
+      });
+    },
+    updateGroup: function (id, name) {
+      return post({ action: 'updateGroup', id: id, name: name }).then(function (r) {
         return withState(r, 'group', normGroup);
       });
     },
@@ -302,6 +308,7 @@ function DemoBackend() {
   function pub(s) {
     var c = clone(s);
     c.groups = live(c.groups);
+    c.members = live(c.members);
     c.expenses = live(c.expenses);
     c.settlements = live(c.settlements);
     return c;
@@ -332,7 +339,7 @@ function DemoBackend() {
     var name = titleCase(raw.name);
     if (!name) throw new Error('name cannot be blank');
     var dupe = s.members.some(function (x) {
-      return x.groupId === groupId && titleCase(x.name) === name;
+      return !x.deleted && x.groupId === groupId && titleCase(x.name) === name;
     });
     if (dupe) throw new Error('that name is already in this group');
     var member = {
@@ -489,9 +496,20 @@ function DemoBackend() {
       save();
       return Promise.resolve(snap(s));
     },
+    updateGroup: function (id, name) {
+      var s = load();
+      var g = s.groups.filter(function (x) { return x.id === id; })[0];
+      if (!g) return Promise.reject(new Error('unknown group'));
+      var n = String(name == null ? '' : name).trim().slice(0, 80);
+      if (!n) return Promise.reject(new Error('name cannot be blank'));
+      g.name = n;
+      log(s, 'updateGroup', id, id, { name: n });
+      save();
+      return Promise.resolve({ group: clone(g), state: pub(s) });
+    },
     updateMember: function (groupId, id, patch) {
       var s = load();
-      var m = s.members.filter(function (x) { return x.id === id; })[0];
+      var m = s.members.filter(function (x) { return x.id === id && !x.deleted; })[0];
       if (!m) return Promise.reject(new Error('unknown member'));
       if (patch.name !== undefined) {
         var name = titleCase(patch.name);
@@ -512,8 +530,11 @@ function DemoBackend() {
     },
     deleteMember: function (groupId, id) {
       var s = load();
-      var m = s.members.filter(function (x) { return x.id === id; })[0];
-      if (!m) return Promise.reject(new Error('unknown member'));
+      var m = s.members.filter(function (x) { return x.id === id && !x.deleted; })[0];
+      if (!m) {
+        if (s.members.some(function (x) { return x.id === id; })) return Promise.resolve(snap(s)); // idempotent
+        return Promise.reject(new Error('unknown member'));
+      }
       var active = s.expenses.some(function (e) {
         return !e.deleted && (String(e.paidBy) === String(id) ||
           e.splitAmong.map(String).indexOf(String(id)) !== -1);
@@ -521,7 +542,7 @@ function DemoBackend() {
         return !x.deleted && (String(x.fromId) === String(id) || String(x.toId) === String(id));
       });
       if (active) return Promise.reject(new Error('member has expenses or payments and cannot be removed'));
-      s.members = s.members.filter(function (x) { return x.id !== id; });
+      m.deleted = true;
       log(s, 'deleteMember', groupId, id, { name: m.name });
       save();
       return Promise.resolve(snap(s));

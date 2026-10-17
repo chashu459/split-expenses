@@ -99,12 +99,6 @@
                        '#16a34a', '#0d9488', '#0891b2', '#2563eb', '#7c3aed',
                        '#c026d3', '#db2777'];
 
-  function hashStr(s) {
-    var h = 0;
-    for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-    return Math.abs(h);
-  }
-
   function baseInitials(name) {
     var parts = String(name).trim().split(/\s+/).filter(Boolean);
     if (!parts.length) return '?';
@@ -123,27 +117,32 @@
 
   function avatarHTML(member, members) {
     if (!member) return '';
-    return '<span class="avatar" style="background:' + avatarColor(member, members) + '" title="' +
+    return '<span class="avatar" style="background:' + avatarColor(member) + '" title="' +
       esc(normalizeName(member.name)) + '">' + esc(avatarLabel(member, members)) + '</span>';
   }
 
-  // Color by position in the member list (deduped by name), so the people
-  // you see together always get distinct colors. Falls back to the name
-  // hash when the member isn't in the list.
-  function avatarColor(member, members) {
-    var order = [], seen = {};
-    (members || []).forEach(function (m) {
-      var n = normalizeName(m.name);
-      if (!seen[n]) { seen[n] = true; order.push(n); }
-    });
-    var idx = order.indexOf(normalizeName(member.name));
-    if (idx === -1) idx = hashStr(normalizeName(member.name));
-    return AVATAR_COLORS[idx % AVATAR_COLORS.length];
+  // Salted FNV-1a over the normalized name: the same person gets the same
+  // color in every group, and the salt spreads short names evenly across
+  // the 12-hue palette.
+  function avatarColor(member) {
+    var s = 'avatar-color:' + normalizeName(member.name);
+    var h = 0x811c9dc5;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return AVATAR_COLORS[(h >>> 0) % AVATAR_COLORS.length];
   }
 
   function receiptURL(e) {
     if (!e.receiptId || e.receiptId === 'demo-receipt') return null;
     return 'https://drive.google.com/file/d/' + encodeURIComponent(e.receiptId) + '/view';
+  }
+  // Inline image preview for an attached receipt (Drive thumbnail endpoint;
+  // works for anyone-with-link files, no auth needed).
+  function receiptThumbURL(e) {
+    if (!e.receiptId || e.receiptId === 'demo-receipt') return null;
+    return 'https://drive.google.com/thumbnail?id=' + encodeURIComponent(e.receiptId) + '&sz=w400';
   }
 
   function membersOf(groupId) {
@@ -259,6 +258,9 @@
     // opts.lock: the modal can't be dismissed by clicking the overlay
     // (used for gates the user must answer, like joining a group).
     ov._locked = !!(opts && opts.lock);
+    // Freeze the page behind the modal so scrolling the form can't
+    // scroll the background.
+    document.body.style.overflow = 'hidden';
     var first = $('#overlay input, #overlay select');
     if (first) first.focus();
   }
@@ -267,6 +269,7 @@
     ov._locked = false;
     ov.classList.remove('open');
     ov.innerHTML = '';
+    document.body.style.overflow = '';
   }
 
   /* ---------- screens ---------- */
@@ -375,10 +378,10 @@
 
     $('#app').innerHTML =
       demoBanner() + headerHtml +
-        '<button class="icon-btn" data-add-expense title="Add expense">＋</button>' +
         '<div class="menu-wrap">' +
           '<button class="icon-btn" id="settings-btn" title="Group settings">⚙</button>' +
           '<div class="menu hidden" id="settings-menu">' +
+            '<button data-menu="rename">Rename group</button>' +
             '<button data-menu="members">Manage members</button>' +
           '</div>' +
         '</div>' +
@@ -401,6 +404,10 @@
     $('#settings-menu [data-menu="members"]').addEventListener('click', function () {
       $('#settings-menu').classList.add('hidden');
       membersModal(g);
+    });
+    $('#settings-menu [data-menu="rename"]').addEventListener('click', function () {
+      $('#settings-menu').classList.add('hidden');
+      renameGroupModal(g);
     });
     wireMeChip();
     $all('[data-tab]').forEach(function (el) {
@@ -825,10 +832,26 @@
     });
   }
 
+  // Group settings → rename the group in place.
+  function renameGroupModal(g) {
+    openModal('<h2>Rename group</h2>' +
+      '<label>Group name<input id="f-gname" maxlength="80" value="' + esc(g.name) + '"></label>' +
+      '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
+      '<button class="btn primary" id="m-ok">Save</button></div>');
+    $('#m-cancel').addEventListener('click', closeModal);
+    $('#m-ok').addEventListener('click', function () {
+      var name = $('#f-gname').value.trim().slice(0, 80);
+      if (!name) { toast('Give the group a name', true); return; }
+      if (name === g.name) { closeModal(); return; }
+      mutate('Rename group',
+        function () { g.name = name; },
+        function () { return backend.updateGroup(g.id, name); });
+    });
+  }
+
   // Group settings → member list: edit Venmo handles, add people, remove
   // members that have no expenses or payments (locked otherwise).
-  function membersModal(g) {
-    var ms = membersOf(g.id);
+  function membersModal(g) {    var ms = membersOf(g.id);
     function isActive(id) {
       return state.expenses.some(function (e) {
         return e.groupId === g.id && (String(e.paidBy) === String(id) ||
@@ -949,9 +972,11 @@
       receiptBlock = '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>';
     } else if (existing.receiptId) {
       var rurl = receiptURL(existing);
-      receiptBlock = '<div class="receipt-now">🧾 ' +
-        (rurl ? '<a href="' + rurl + '" target="_blank" rel="noopener">View current receipt</a>'
-              : '<span class="muted">Receipt attached</span>') + '</div>' +
+      var thumb = receiptThumbURL(existing);
+      receiptBlock = '<div class="receipt-now">' +
+        (thumb ? '<a href="' + rurl + '" target="_blank" rel="noopener" title="View full receipt">' +
+          '<img class="receipt-thumb" src="' + thumb + '" alt="Receipt preview"></a>'
+               : '<span class="muted">🧾 Receipt attached</span>') + '</div>' +
         '<label>Replace receipt<input id="f-receipt" type="file" accept="image/*"></label>';
     } else {
       receiptBlock = '<label>Add receipt<input id="f-receipt" type="file" accept="image/*"></label>';

@@ -496,13 +496,21 @@ t('updateMember rejects dupes, bad handles, unknown members', () => {
   assert.match(r.res.error, /missing field/);
 });
 
-t('deleteMember removes inactive members, refuses active ones', () => {
+t('deleteMember soft-deletes inactive members, refuses active ones', () => {
   post({ action: 'addMember', id: 'm-dm1', groupId: 'g1', name: 'Dee Emm' });
   const before = sheets.members.getDataRange().getValues().length;
   let r = post({ action: 'deleteMember', id: 'm-dm1', groupId: 'g1' });
   assert.strictEqual(r.res.ok, true);
-  assert.strictEqual(r.res.state.members.filter((m) => m.id === 'm-dm1').length, 0);
-  assert.strictEqual(sheets.members.getDataRange().getValues().length, before - 1, 'row removed');
+  assert.strictEqual(r.res.state.members.filter((m) => m.id === 'm-dm1').length, 0, 'hidden from state');
+  assert.strictEqual(sheets.members.getDataRange().getValues().length, before, 'row not removed');
+  const raw = sheets.members.getDataRange().getValues();
+  const head = raw[0].map(String);
+  assert.ok(head.includes('deleted'), 'deleted column exists');
+  const row = raw.find((x) => String(x[0]) === 'm-dm1');
+  assert.strictEqual(String(row[head.indexOf('deleted')]), '1', 'deleted flag set');
+  r = post({ action: 'deleteMember', id: 'm-dm1', groupId: 'g1' }); // idempotent retry
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.alreadyDeleted, true);
   // active member: paid an expense
   post({ action: 'addMember', id: 'm-dm2', groupId: 'g1', name: 'Dee Active' });
   post({
@@ -520,6 +528,25 @@ t('deleteMember removes inactive members, refuses active ones', () => {
   const kinds = log.map((x) => String(x[2]));
   assert.ok(kinds.includes('updateMember'), 'updateMember logged');
   assert.ok(kinds.includes('deleteMember'), 'deleteMember logged');
+});
+
+t('updateGroup renames the group in place', () => {
+  let r = post({ action: 'updateGroup', id: 'g1', name: 'Renamed Trip' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.group.name, 'Renamed Trip');
+  const { res } = get('state');
+  assert.strictEqual(res.state.groups.find((g) => g.id === 'g1').name, 'Renamed Trip');
+  const raw = sheets.groups.getDataRange().getValues();
+  const row = raw.find((x) => String(x[0]) === 'g1');
+  assert.strictEqual(String(row[1]), 'Renamed Trip', 'sheet cell updated');
+  r = post({ action: 'updateGroup', id: 'g1', name: '   ' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /blank/);
+  r = post({ action: 'updateGroup', id: 'nope', name: 'X' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /unknown group/);
+  const log = sheets.activity.getDataRange().getValues().slice(1);
+  assert.ok(log.map((x) => String(x[2])).includes('updateGroup'), 'updateGroup logged');
 });
 
 console.log(passed + ' gas tests passed');

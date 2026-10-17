@@ -60,7 +60,7 @@
 
 var TABS = {
   groups:      ['id', 'name', 'created_at', 'deleted'],
-  members:     ['id', 'group_id', 'name', 'venmo'],
+  members:     ['id', 'group_id', 'name', 'venmo', 'deleted'],
   expenses:    ['id', 'group_id', 'description', 'amount_cents', 'paid_by',
                 'split_among', 'shares', 'receipt_id', 'date', 'created_at', 'deleted'],
   settlements: ['id', 'group_id', 'from_id', 'to_id', 'amount_cents',
@@ -117,6 +117,7 @@ function doPost(e) {
     var out;
     switch (body.action) {
       case 'createGroup':      out = createGroup_(ss, db, body);      break;
+      case 'updateGroup':      out = updateGroup_(ss, db, body);      break;
       case 'addMember':        out = addMember_(ss, db, body);        break;
       case 'addMembers':       out = addMembers_(ss, db, body);       break;
       case 'updateMember':     out = updateMember_(ss, db, body);     break;
@@ -237,7 +238,7 @@ function readDb(ss) {
   ss = ss || SpreadsheetApp.getActiveSpreadsheet();
   return {
     groups: rowsIn_(sheet_(ss, 'groups')).filter(function (r) { return !isDeleted_(r); }),
-    members: rowsIn_(sheet_(ss, 'members')),
+    members: rowsIn_(sheet_(ss, 'members')).filter(function (r) { return !isDeleted_(r); }),
     expenses: rowsIn_(sheet_(ss, 'expenses')).filter(function (r) { return !isDeleted_(r); }).map(parseExpense_),
     settlements: rowsIn_(sheet_(ss, 'settlements')).filter(function (r) { return !isDeleted_(r); }).map(parseSettlement_),
   };
@@ -364,6 +365,16 @@ function createGroup_(ss, db, body) {
   return { group: g };
 }
 
+/** Rename a group in place. */
+function updateGroup_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var g = getGroup_(db, body.id);
+  var name = cleanName_(body.name, 80);
+  setCellById_(ss, 'groups', g.id, 'name', name);
+  g.name = name;
+  return { group: g };
+}
+
 function addMember_(ss, db, body) {
   need_(body, ['groupId']);
   getGroup_(db, body.groupId);
@@ -453,13 +464,17 @@ function updateMember_(ss, db, body) {
   return { member: m };
 }
 
-/** Remove a member, but only when they have no expenses or payments in the
- *  group — otherwise balances would dangle. The row is deleted outright
- *  (there is nothing left to reference it) and the removal is logged. */
+/** Soft-delete a member, but only when they have no expenses or payments in
+ *  the group — otherwise balances would dangle. The row is flagged, never
+ *  removed. Idempotent — deleting twice is a no-op. */
 function deleteMember_(ss, db, body) {
   if (!body.id) throw new Error('missing field: id');
   var m = findById_(db.members, body.id);
-  if (!m) throw new Error('unknown member');
+  if (!m) {
+    var existed = rawRows_(ss, 'members').some(function (r) { return String(r.id) === String(body.id); });
+    if (!existed) throw new Error('unknown member');
+    return { alreadyDeleted: true }; // idempotent no-op
+  }
   var active =
     db.expenses.some(function (e) {
       return String(e.paid_by) === String(m.id) ||
@@ -469,11 +484,7 @@ function deleteMember_(ss, db, body) {
       return String(s.from_id) === String(m.id) || String(s.to_id) === String(m.id);
     });
   if (active) throw new Error('member has expenses or payments and cannot be removed');
-  var sheet = sheet_(ss, 'members');
-  var values = sheet.getDataRange().getValues();
-  for (var r = 1; r < values.length; r++) {
-    if (String(values[r][0]) === String(m.id)) { sheet.deleteRow(r + 1); break; }
-  }
+  softDelete_(ss, db, 'members', db.members, body.id);
   db.members = db.members.filter(function (x) { return String(x.id) !== String(m.id); });
   return { memberId: m.id };
 }
@@ -647,6 +658,7 @@ function logActivity_(ss, body, out) {
   var details = {};
   switch (body.action) {
     case 'createGroup':
+    case 'updateGroup':
       details = { name: body.name };
       break;
     case 'addMember':

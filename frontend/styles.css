@@ -140,6 +140,7 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 .modal {
   background: var(--card); border-radius: 16px 16px 0 0;
   width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
 }
 @media (min-width: 600px) {
@@ -304,3 +305,9 @@ a.receipt { cursor: pointer; }
 .loading { text-align: center; padding: 72px 20px; color: var(--muted); }
 .loading .syncdot { font-size: 30px; }
 .loading p { margin-top: 12px; font-size: 15px; }
+
+/* receipt image preview in the edit modal */
+.receipt-thumb {
+  display: block; max-width: 150px; max-height: 150px;
+  border-radius: 8px; border: 1px solid var(--line); margin-top: 6px;
+}
