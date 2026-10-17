@@ -1,0 +1,30 @@
+# Auto-deploy backend/Code.gs to Apps Script on every push that touches it:
+# pushes the code, cuts a new version, and repoints the web app deployment.
+# One-time setup (GitHub repo -> Settings -> Secrets and variables -> Actions):
+#   APPS_SCRIPT_CLIENT_ID, APPS_SCRIPT_CLIENT_SECRET, APPS_SCRIPT_REFRESH_TOKEN,
+#   APPS_SCRIPT_ID, APPS_SCRIPT_DEPLOYMENT_ID
+# See build/get-refresh-token.js and the README for how to mint the token.
+name: Deploy Apps Script backend
+
+on:
+  push:
+    branches: [main]
+    paths: ['backend/Code.gs']
+  workflow_dispatch: # manual run from the Actions tab
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Deploy to Apps Script
+        run: node build/deploy-appscript.js
+        env:
+          APPS_SCRIPT_CLIENT_ID: ${{ secrets.APPS_SCRIPT_CLIENT_ID }}
+          APPS_SCRIPT_CLIENT_SECRET: ${{ secrets.APPS_SCRIPT_CLIENT_SECRET }}
+          APPS_SCRIPT_REFRESH_TOKEN: ${{ secrets.APPS_SCRIPT_REFRESH_TOKEN }}
+          APPS_SCRIPT_ID: ${{ secrets.APPS_SCRIPT_ID }}
+          APPS_SCRIPT_DEPLOYMENT_ID: ${{ secrets.APPS_SCRIPT_DEPLOYMENT_ID }}
