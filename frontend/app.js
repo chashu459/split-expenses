@@ -633,10 +633,7 @@
       (listHtml
         ? '<div class="sect-label">Switch to</div><div class="id-list">' + listHtml + '</div>'
         : '') +
-      '<div class="sect-label">Add a new person</div>' +
-      '<div class="inline-row"><input id="f-newname" maxlength="40" placeholder="New name">' +
-      '<button class="btn" id="m-add-new">Add</button></div>' +
-      '<div class="sect-label">Edit ' + esc(myName || '') + '</div>' +
+      '<div class="sect-label">Edit name and Venmo</div>' +
       '<label>Display name<input id="f-myname" maxlength="40" value="' + esc(myName || '') + '"></label>' +
       '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" value="' +
       esc(myVenmo()) + '" placeholder="@handle"></label>' +
@@ -653,15 +650,6 @@
         closeModal();
         render();
       });
-    });
-    var addBtn = $('#m-add-new');
-    if (addBtn) addBtn.addEventListener('click', function () {
-      var n = normalizeName($('#f-newname').value);
-      if (!n) { toast('Enter a name', true); return; }
-      myName = n; // fresh identity: no member rows are touched
-      saveMe();
-      closeModal();
-      render();
     });
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
