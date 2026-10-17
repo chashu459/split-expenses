@@ -399,6 +399,18 @@ t('bootstrap adds venmo column to an existing members tab', () => {
   assert.strictEqual(old.name, 'Old Guy');
 });
 
+t('POST bootstrap action runs before readDb (missing tabs do not break it)', () => {
+  delete sheets.activity; // sheet from before the activity tab existed
+  const { res } = post({ action: 'bootstrap' });
+  assert.strictEqual(res.ok, true);
+  assert.ok(sheets.activity, 'activity tab created');
+  const head = sheets.activity.getDataRange().getValues()[0].map(String);
+  assert.ok(head.includes('action'), 'activity headers written');
+  // and the sheet is fully readable again afterwards
+  const st = get('state');
+  assert.strictEqual(st.res.ok, true);
+});
+
 t('deleteExpense is a soft delete: row stays in the sheet, hidden from state', () => {
   const before = sheets.expenses.getDataRange().getValues().length;
   let r = post({ action: 'deleteExpense', id: 'e-upd' });
@@ -482,7 +494,8 @@ t('updateMember edits name and venmo in place', () => {
 });
 
 t('updateMember rejects dupes, bad handles, unknown members', () => {
-  let r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', name: 'Jiashu' });
+  post({ action: 'addMember', id: 'm-um2', groupId: 'g1', name: 'Dupe Target' });
+  let r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', name: 'dupe target' });
   assert.strictEqual(r.res.ok, false);
   assert.match(r.res.error, /already in this group/);
   r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', venmo: 'not a handle!' });

@@ -92,4 +92,28 @@ async function api(at, method, url, body) {
   cfg.versionNumber = ver.versionNumber;
   await api(at, 'PUT', `${base}/deployments/${deploymentId}`, { deploymentConfig: cfg });
   console.log('deployment now serving version', ver.versionNumber);
+
+  // 4. run bootstrap against the live deployment so new tabs/columns are
+  //    applied automatically (idempotent; safe on every deploy). The new
+  //    version can take a few seconds to propagate, so retry until the
+  //    live endpoint answers ok.
+  const execUrl = `https://script.google.com/macros/s/${deploymentId}/exec`;
+  let bootstrapped = false;
+  for (let i = 0; i < 6 && !bootstrapped; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 20000));
+    try {
+      const r = await fetch(execUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'bootstrap' }),
+      });
+      const j = await r.json();
+      if (j && j.ok) bootstrapped = true;
+      else console.log(`bootstrap attempt ${i + 1}: not ready yet (${JSON.stringify(j).slice(0, 120)})`);
+    } catch (err) {
+      console.log(`bootstrap attempt ${i + 1} failed: ${err.message}`);
+    }
+  }
+  if (!bootstrapped) throw new Error('bootstrap did not succeed after 6 attempts');
+  console.log('bootstrap ok');
 })().catch((e) => { console.error('deploy failed:', e.message); process.exit(1); });

@@ -4,13 +4,15 @@
  * SETUP
  *  1. Create a new Google Sheet (this script must be bound to it:
  *     Extensions > Apps Script from that sheet, then paste this file).
- *  2. Run `bootstrap` once from the Apps Script editor (it creates the
- *     Groups / Members / Expenses / Settlements tabs with headers; on an
- *     existing sheet it adds any missing columns without touching data).
- *  3. Deploy > New deployment > Web app:
+ *  2. Deploy > New deployment > Web app:
  *       Execute as: Me
  *       Who has access: Anyone
- *     Copy the Web App URL into the frontend's config.js as API_URL.
+ *  3. Schema migrations run themselves: every deploy POSTs
+ *     {action:'bootstrap'} to the live URL, which creates the
+ *     Groups / Members / Expenses / Settlements tabs with headers and
+ *     adds any missing columns without touching existing data.
+ *     (You can also run `bootstrap` manually from the editor.)
+ *  4. Copy the Web App URL into the frontend's config.js as API_URL.
  *     After editing this file, redeploy as a NEW VERSION or the live URL
  *     keeps running the old code. The receipts feature needs Drive access,
  *     so Google will ask you to re-authorize on the first deploy that
@@ -113,6 +115,13 @@ function doPost(e) {
     lock.waitLock(10000);
     var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (body.action === 'bootstrap') {
+      // Runs before readDb: on a fresh or outdated sheet readDb would throw
+      // for missing tabs/columns. Idempotent — only creates tabs and appends
+      // missing columns, never touches existing data.
+      bootstrap();
+      return json_({ ok: true });
+    }
     var db = readDb(ss); // each tab read exactly once per request
     var out;
     switch (body.action) {
