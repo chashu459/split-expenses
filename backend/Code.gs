@@ -332,12 +332,22 @@ function cleanVenmo_(v) {
 
 /** Member names are normalized to title case so "jiashu wang" and
  *  "Jiashu Wang" are recognized as the same person everywhere. */
+/** Expense description: letters, numbers, and spaces only. Blank -> 'Expense'. */
+function cleanDesc_(v) {
+  var s = String(v == null ? '' : v).trim().replace(/\s+/g, ' ').slice(0, 120);
+  if (!s) return 'Expense';
+  if (!/^[A-Za-z0-9 ]+$/.test(s)) throw new Error('descriptions can only contain letters and numbers');
+  return s;
+}
+
 function normalizeMemberName_(v) {
   var parts = String(v).trim().split(/\s+/).filter(Boolean);
   if (!parts.length) throw new Error('name cannot be blank');
-  return parts.map(function (w) {
+  var name = parts.map(function (w) {
     return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
   }).join(' ').slice(0, 40);
+  if (!/^[A-Za-z0-9 ]+$/.test(name)) throw new Error('names can only contain letters and numbers');
+  return name;
 }
 
 /** Validate uneven shares: {memberId: cents}, must total amountCents. */
@@ -516,7 +526,7 @@ function addExpense_(ss, db, body) {
   var ex = {
     id: id,
     group_id: String(body.groupId),
-    description: String(body.description).trim().slice(0, 120) || 'Expense',
+    description: cleanDesc_(body.description),
     amount_cents: cents,
     paid_by: String(body.paidBy),
     split_among: splitAmong,
@@ -550,7 +560,7 @@ function updateExpense_(ss, db, body) {
   }
   if (row === -1) throw new Error('unknown expense');
   var updates = {
-    description: String(body.description).trim().slice(0, 120) || 'Expense',
+    description: cleanDesc_(body.description),
     amount_cents: cents,
     paid_by: String(body.paidBy),
     split_among: JSON.stringify(splitAmong),

@@ -275,8 +275,12 @@ a.receipt { cursor: pointer; }
 
 /* members modal rows */
 .mem-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
-.mem-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mem-row .mem-venmo { display: inline-block; width: 110px; flex-shrink: 0; margin-top: 0; }
+.mem-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-row .mem-venmo {
+  display: inline-block; width: 110px; flex-shrink: 0; margin-top: 0;
+  padding: 7px 10px; font-size: 14px;
+}
+.mem-row .del, .mem-lock { flex-shrink: 0; width: 30px; text-align: center; }
 .mem-lock { color: var(--muted); font-size: 15px; padding: 2px 6px; }
 
 /* group card delete */
@@ -297,6 +301,13 @@ a.receipt { cursor: pointer; }
   font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
   color: var(--muted); margin: 16px 0 8px; font-weight: 600;
 }
+.id-current {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 0 2px; font-size: 16px;
+}
+.id-pick.id-none { border-style: dashed; color: var(--muted); }
+#id-edit, #id-new { margin: 10px 0 4px; }
+#id-edit .btn.primary { margin-top: 10px; width: 100%; }
 .inline-row { display: flex; gap: 8px; align-items: stretch; }
 .inline-row input { flex: 1; width: auto; margin-top: 0; }
 .inline-row .btn { flex-shrink: 0; }

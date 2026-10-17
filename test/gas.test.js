@@ -170,6 +170,34 @@ t('addExpense with unknown member rejected', () => {
   assert.match(res.error, /member not in group/);
 });
 
+t('names and descriptions reject non-alphanumeric characters', () => {
+  let r = post({ action: 'addMember', id: 'm-bad1', groupId: 'g1', name: 'Bob!' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /letters and numbers/);
+  r = post({ action: 'addMember', id: 'm-bad2', groupId: 'g1', name: 'Evil <script>' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /letters and numbers/);
+  // spaces and numbers are fine
+  r = post({ action: 'addMember', id: 'm-ok1', groupId: 'g1', name: 'Bob 2nd' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.member.name, 'Bob 2nd');
+  r = post({
+    action: 'addExpense', id: 'e-bad', groupId: 'g1', description: 'Dinner (sushi!)',
+    amountCents: 100, paidBy: 'm-ok1', splitAmong: ['m-ok1'], date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /letters and numbers/);
+  r = post({
+    action: 'addExpense', id: 'e-ok', groupId: 'g1', description: 'Dinner 2',
+    amountCents: 100, paidBy: 'm-ok1', splitAmong: ['m-ok1'], date: '2026-10-17',
+  });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.expense.description, 'Dinner 2');
+  // clean up so later tests see the original seed state
+  post({ action: 'deleteExpense', id: 'e-ok' });
+  post({ action: 'deleteMember', id: 'm-ok1', groupId: 'g1' });
+});
+
 t('addExpense missing field rejected', () => {
   const { res } = post({ action: 'addExpense', id: 'e9', groupId: 'g1' });
   assert.strictEqual(res.ok, false);

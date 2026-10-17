@@ -31,22 +31,35 @@
     });
   }
 
-  function dollarsToCents(str) {
-    var n = Math.round(parseFloat(String(str).trim()) * 100);
-    return (isFinite(n) && n > 0) ? n : null;
+  // Names and descriptions: letters, numbers, and spaces only.
+  // Returns an error message, or null when the value is acceptable.
+  function textError(v, what) {
+    var s = String(v == null ? '' : v).trim();
+    if (!s) return 'Enter ' + what;
+    if (!/^[A-Za-z0-9 ]+$/.test(s.replace(/\s+/g, ' ')))
+      return (what === 'a description' ? 'Descriptions' : 'Names') +
+        ' can only contain letters and numbers';
+    return null;
   }
 
-  // Parse one custom-split amount box.
-  // -> {state:'empty'} for blank or zero (counts as 0, excluded from the split),
-  //    {state:'ok', cents} for a positive amount,
-  //    {state:'bad'} for garbage/negative input.
+  // Amounts are whole dollars: the input must be a positive integer.
+  // Returns cents, or null when invalid.
+  function dollarsToCents(str) {
+    var t = String(str == null ? '' : str).trim();
+    if (!/^\d+$/.test(t)) return null;
+    var dollars = parseInt(t, 10);
+    return dollars > 0 ? dollars * 100 : null;
+  }
+
+  // Parse one custom-split amount box (whole dollars).
+  // -> {state:'ok', cents} for a positive integer,
+  //    {state:'bad'} for blank, zero, negative, or garbage.
   function parseShareInput(raw) {
     var t = String(raw == null ? '' : raw).trim();
-    if (t === '') return { state: 'empty' };
-    var n = Math.round(parseFloat(t) * 100);
-    if (!isFinite(n) || n < 0) return { state: 'bad' };
-    if (n === 0) return { state: 'empty' };
-    return { state: 'ok', cents: n };
+    if (!/^\d+$/.test(t)) return { state: 'bad' };
+    var dollars = parseInt(t, 10);
+    if (dollars <= 0) return { state: 'bad' };
+    return { state: 'ok', cents: dollars * 100 };
   }
 
   function fmtDate(d) { return String(d || '').slice(0, 10); } // date only, never datetime
@@ -332,8 +345,18 @@
     wireMeChip();
   }
 
+  // Full-screen loading state (spinner + text) while the server confirms a
+  // non-optimistic action. headerHtml keeps the surrounding chrome.
+  function showLoading(headerHtml, text) {
+    $('#app').innerHTML = demoBanner() + headerHtml +
+      '<main class="wrap"><div class="loading"><span class="syncdot"></span>' +
+      '<p>' + esc(text) + '</p></div></main>';
+    wireMeChip();
+  }
+
   // Shared delete-group flow (list page only): warns about unsettled
-  // balances, then soft-deletes. Stays on the current view.
+  // balances, then soft-deletes behind a loading screen while the server
+  // confirms — like the join flow, never optimistic.
   function deleteGroupFlow(groupId) {
     var g = state.groups.filter(function (x) { return x.id === groupId; })[0];
     if (!g) return;
@@ -344,9 +367,20 @@
         '. Delete the group anyway? It will be hidden from the app but kept in the sheet.'
       : 'Delete this group? It will be hidden from the app but kept in the sheet.';
     if (!confirm(msg)) return;
-    mutate('Delete group',
-      function () { state.groups = state.groups.filter(function (x) { return x.id !== groupId; }); },
-      function () { return backend.deleteGroup(groupId); });
+    pendingOps++;
+    showLoading('<header class="top"><h1>Split it</h1>' + syncDot() + meChipHTML() + '</header>',
+      'Deleting ' + g.name + '…');
+    opChain = opChain.then(function () {
+      return backend.deleteGroup(groupId).then(function (out) {
+        pendingOps--;
+        setState(out.state);
+        render();
+      }).catch(function (err) {
+        pendingOps--;
+        toast('Delete failed (' + (err && err.message || err) + ') — please try again.', true);
+        render(); // back to the groups list
+      });
+    });
   }
 
   function groupHeaderHTML(g) {
@@ -630,15 +664,21 @@
       return;
     }
     openModal('<h2>Your identity</h2>' +
-      (listHtml
-        ? '<div class="sect-label">Switch to</div><div class="id-list">' + listHtml + '</div>'
-        : '') +
-      '<div class="sect-label">Edit name and Venmo</div>' +
-      '<label>Display name<input id="f-myname" maxlength="40" value="' + esc(myName || '') + '"></label>' +
-      '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" value="' +
-      esc(myVenmo()) + '" placeholder="@handle"></label>' +
-      '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
-      '<button class="btn primary" id="m-ok">Save</button></div>');
+      '<div class="id-current"><span>You are <b>' + esc(myName || '') + '</b></span>' +
+      '<button class="btn" id="m-edit-toggle">Edit</button></div>' +
+      '<div id="id-edit" hidden>' +
+      '<label>Display name<input id="f-myname" maxlength="40"></label>' +
+      '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" placeholder="@handle"></label>' +
+      '<button class="btn primary" id="m-ok">Save changes</button>' +
+      '</div>' +
+      '<div class="sect-label">Switch to</div>' +
+      '<div class="id-list">' + listHtml +
+      '<button class="id-pick id-none" id="m-none">None</button></div>' +
+      '<button class="btn" id="m-new-toggle">+ New person</button>' +
+      '<div id="id-new" hidden><div class="inline-row">' +
+      '<input id="f-newname" maxlength="40" placeholder="New name">' +
+      '<button class="btn primary" id="m-add-new">Add</button></div></div>' +
+      '<div class="modal-actions"><button class="btn" id="m-cancel">Close</button></div>');
     wireIdentityModal(true);
   }
 
@@ -652,9 +692,43 @@
       });
     });
     $('#m-cancel').addEventListener('click', closeModal);
+    var editToggle = $('#m-edit-toggle');
+    if (editToggle) editToggle.addEventListener('click', function () {
+      var f = $('#id-edit');
+      f.hidden = !f.hidden;
+      if (!f.hidden) {
+        $('#f-myname').value = myName || '';
+        $('#f-myvenmo').value = myVenmo();
+        $('#f-myname').focus();
+      }
+    });
+    var newToggle = $('#m-new-toggle');
+    if (newToggle) newToggle.addEventListener('click', function () {
+      var f = $('#id-new');
+      f.hidden = !f.hidden;
+      if (!f.hidden) $('#f-newname').focus();
+    });
+    var addBtn = $('#m-add-new');
+    if (addBtn) addBtn.addEventListener('click', function () {
+      var err = textError($('#f-newname').value, 'a name');
+      if (err) { toast(err, true); return; }
+      myName = normalizeName($('#f-newname').value); // fresh identity: no member rows are touched
+      saveMe();
+      closeModal();
+      render();
+    });
+    var noneBtn = $('#m-none');
+    if (noneBtn) noneBtn.addEventListener('click', function () {
+      myName = null; // clear identity
+      saveMe();
+      view = { name: 'groups' };
+      render();
+      identityModal(true); // prompt to pick again, like first visit
+    });
     $('#m-ok').addEventListener('click', function () {
+      var err = textError($('#f-myname').value, 'your name');
+      if (err) { toast(err, true); return; }
       var newName = normalizeName($('#f-myname').value);
-      if (!newName) { toast('Enter your name', true); return; }
       var vEl = $('#f-myvenmo');
       var newVenmo = vEl ? vEl.value.trim().replace(/^@+/, '') : null;
       if (newVenmo && !/^[A-Za-z0-9._-]{1,30}$/.test(newVenmo)) {
@@ -746,16 +820,20 @@
       if (!t) return;
       var at = t.lastIndexOf('@');
       if (at === -1) {
-        members.push({ name: normalizeName(t), venmo: '' });
+        var n0 = normalizeName(t);
+        if (!/^[A-Za-z0-9 ]+$/.test(n0)) { bad.push(t + ' (bad name)'); return; }
+        members.push({ name: n0, venmo: '' });
         return;
       }
       var namePart = t.slice(0, at).trim();
       var handle = t.slice(at + 1).trim();
-      if (!namePart || !/^[A-Za-z0-9._-]{1,30}$/.test(handle)) {
-        bad.push(t);
+      var n1 = normalizeName(namePart);
+      if (!n1 || !/^[A-Za-z0-9 ]+$/.test(n1)) { bad.push(t + ' (bad name)'); return; }
+      if (!/^[A-Za-z0-9._-]{1,30}$/.test(handle)) {
+        bad.push(t + ' (bad Venmo handle)');
         return;
       }
-      members.push({ name: normalizeName(namePart), venmo: handle });
+      members.push({ name: n1, venmo: handle });
     });
     return { members: members, bad: bad };
   }
@@ -769,7 +847,7 @@
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
       var parsed = parseMemberLines($('#f-names').value);
-      if (parsed.bad.length) { toast('Bad Venmo handle: ' + parsed.bad.join(', '), true); return; }
+      if (parsed.bad.length) { toast('Could not add: ' + parsed.bad.join(', '), true); return; }
       if (!parsed.members.length) { toast('Enter at least one name', true); return; }
       var members = parsed.members.map(function (p) {
         return { id: uuid(), groupId: g.id, name: p.name, venmo: p.venmo };
@@ -800,12 +878,9 @@
     $('#m-join').addEventListener('click', function () {
       var m = { id: uuid(), groupId: g.id, name: myName, venmo: myVenmo() };
       closeModal();
-      $('#app').innerHTML = demoBanner() + groupHeaderHTML(g) + '</header>' +
-        '<main class="wrap"><div class="loading"><span class="syncdot"></span>' +
-        '<p>Joining ' + esc(g.name) + '…</p></div></main>';
-      $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
-      wireMeChip();
       pendingOps++;
+      showLoading(groupHeaderHTML(g) + '</header>', 'Joining ' + g.name + '…');
+      $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
       opChain = opChain.then(function () {
         return backend.addMember(m).then(function (out) {
           pendingOps--;
@@ -986,7 +1061,7 @@
     }
     function customAmt(id) {
       if (existing && existing.shares && existing.shares[String(id)] !== undefined) {
-        return ' value="' + (Number(existing.shares[String(id)]) / 100).toFixed(2) + '"';
+        return ' value="' + String(Number(existing.shares[String(id)]) / 100) + '"';
       }
       return '';
     }
@@ -995,7 +1070,7 @@
         '<input type="checkbox" data-csplit="' + esc(m.id) + '"' +
         (inCustom(m.id) ? ' checked' : '') + '></label>' +
         '<span class="crow-name">' + esc(m.name) + '</span>' +
-        '<input class="crow-amt" data-camt="' + esc(m.id) + '" inputmode="decimal" placeholder="0.00"' +
+        '<input class="crow-amt" data-camt="' + esc(m.id) + '" inputmode="numeric" placeholder="0"' +
         customAmt(m.id) + '></div>';
     }).join('');
 
@@ -1003,8 +1078,8 @@
       '<label>Description<input id="f-desc" placeholder="e.g. Dinner" maxlength="120"' +
       (existing ? ' value="' + esc(existing.description) + '"' : '') + '></label>' +
       '<div class="row2">' +
-      '<label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"' +
-      (existing ? ' value="' + (Number(existing.amountCents) / 100).toFixed(2) + '"' : '') + '></label>' +
+      '<label>Amount ($)<input id="f-amount" inputmode="numeric" placeholder="0"' +
+      (existing ? ' value="' + String(Number(existing.amountCents) / 100) + '"' : '') + '></label>' +
       '<label>Date<input id="f-date" type="date" value="' +
       (existing ? esc(fmtDate(existing.date)) : todayISO()) + '"></label>' +
       '</div>' +
@@ -1030,8 +1105,8 @@
     }
     function customState() {
       // { bad, shares: {id: cents}, checked: [ids] }.
-      // Rows with blank/zero amounts count as 0 and are left out of shares;
-      // only garbage input sets bad.
+      // Every checked row needs a positive whole-dollar amount;
+      // anything else sets bad.
       var shares = {}, checked = [], bad = false;
       $all('#split-custom .crow').forEach(function (row) {
         var cb = row.querySelector('[data-csplit]');
@@ -1072,14 +1147,14 @@
       } else {
         var cs = customState();
         if (cs.bad) {
-          box.innerHTML = '<span class="muted">One of the amounts isn\'t a valid number.</span>';
+          box.innerHTML = '<span class="muted">Amounts must be positive whole dollars.</span>';
           return;
         }
         if (!cs.checked.length) {
           box.innerHTML = '<span class="muted">Pick who to split with.</span>';
           return;
         }
-        // Always show the running split: blank amounts count as $0.00.
+        // Always show the running split.
         var sids = Object.keys(cs.shares);
         var sum = sids.reduce(function (n, id) { return n + cs.shares[id]; }, 0);
         var diff = cents - sum;
@@ -1109,7 +1184,7 @@
       var parts = owedSplit({ amountCents: cents, splitAmong: ids, shares: null });
       $all('#split-custom [data-camt]').forEach(function (inp) {
         var id = inp.getAttribute('data-camt');
-        inp.value = parts[id] !== undefined ? (parts[id] / 100).toFixed(2) : '';
+        inp.value = parts[id] !== undefined ? String(Math.floor(parts[id] / 100)) : '';
       });
     }
 
@@ -1157,14 +1232,18 @@
     }
     $('#m-ok').addEventListener('click', function () {
       var cents = dollarsToCents($('#f-amount').value);
-      if (cents === null) { toast('Enter a valid amount', true); return; }
+      if (cents === null) { toast('Enter a whole-dollar amount', true); return; }
+      var descErr = textError($('#f-desc').value, 'a description');
+      var descRaw = $('#f-desc').value.trim().replace(/\s+/g, ' ');
+      if (descRaw && descErr) { toast(descErr, true); return; }
+      var description = descRaw.slice(0, 120) || 'Expense';
       var split, shares = null;
       if (splitMode === 'equal') {
         split = checkedEqualIds();
         if (!split.length) { toast('Pick at least one person to split with', true); return; }
       } else {
         var cs2 = customState();
-        if (cs2.bad) { toast('One of the amounts isn\'t a valid number', true); return; }
+        if (cs2.bad) { toast('Amounts must be positive whole dollars', true); return; }
         var sids2 = Object.keys(cs2.shares);
         if (!sids2.length) { toast('Enter an amount for at least one person', true); return; }
         var sum2 = sids2.reduce(function (n, id) { return n + cs2.shares[id]; }, 0);
@@ -1182,7 +1261,7 @@
       if (isEdit) {
         var updated = {
           id: existing.id, groupId: g.id,
-          description: $('#f-desc').value.trim() || 'Expense',
+          description: description,
           amountCents: cents,
           paidBy: $('#f-paid').value,
           splitAmong: split,
@@ -1211,7 +1290,7 @@
       }
       var ex = {
         id: uuid(), groupId: g.id,
-        description: $('#f-desc').value.trim() || 'Expense',
+        description: description,
         amountCents: cents,
         paidBy: $('#f-paid').value,
         splitAmong: split,
@@ -1261,7 +1340,7 @@
         : '<p class="empty">Everyone is settled up 🎉</p>') +
       '<div class="row2"><label>From<select id="f-from">' + personOpts(me) + '</select></label>' +
       '<label>To<select id="f-to">' + personOpts() + '</select></label></div>' +
-      '<div class="row2"><label>Amount ($)<input id="f-amount" inputmode="decimal" placeholder="0.00"></label>' +
+      '<div class="row2"><label>Amount ($)<input id="f-amount" inputmode="numeric" placeholder="0"></label>' +
       '<label>Date<input id="f-date" type="date" value="' + todayISO() + '"></label></div>' +
       '<div id="venmo-wrap"></div>' +
       '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
@@ -1291,13 +1370,13 @@
         var p = simplified[Number(el.getAttribute('data-sug'))];
         $('#f-from').value = p.from;
         $('#f-to').value = p.to;
-        $('#f-amount').value = (p.amountCents / 100).toFixed(2);
+        $('#f-amount').value = String(p.amountCents / 100);
         refreshVenmo();
       });
     });
     $('#m-ok').addEventListener('click', function () {
       var cents = dollarsToCents($('#f-amount').value);
-      if (cents === null) { toast('Enter a valid amount', true); return; }
+      if (cents === null) { toast('Enter a whole-dollar amount', true); return; }
       var from = $('#f-from').value, to = $('#f-to').value;
       if (from === to) { toast('Pick two different people', true); return; }
       var st = {
@@ -1305,9 +1384,22 @@
         amountCents: cents, date: $('#f-date').value || todayISO(),
       };
       view.tab = 'balances';
-      mutate('Record payment',
-        function () { state.settlements.push(st); },
-        function () { return backend.addSettlement(st); });
+      // Non-optimistic: loading screen while the server confirms.
+      closeModal();
+      pendingOps++;
+      showLoading(groupHeaderHTML(g) + '</header>', 'Recording payment…');
+      $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
+      opChain = opChain.then(function () {
+        return backend.addSettlement(st).then(function (out) {
+          pendingOps--;
+          setState(out.state);
+          render();
+        }).catch(function (err) {
+          pendingOps--;
+          toast('Record payment failed (' + (err && err.message || err) + ') — please try again.', true);
+          render();
+        });
+      });
     });
   }
 

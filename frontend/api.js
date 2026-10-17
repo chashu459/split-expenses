@@ -266,7 +266,7 @@ function DemoBackend() {
         { id: c, groupId: g, name: 'Priya', venmo: '' },
       ],
       expenses: [
-        { id: uid('e'), groupId: g, description: 'Hotel (2 nights)', amountCents: 36000, paidBy: a, splitAmong: [a, b, c], date: today(), createdAt: ts(3000) },
+        { id: uid('e'), groupId: g, description: 'Hotel 2 nights', amountCents: 36000, paidBy: a, splitAmong: [a, b, c], date: today(), createdAt: ts(3000) },
         { id: uid('e'), groupId: g, description: 'Ramen dinner', amountCents: 8400, paidBy: b, splitAmong: [a, b, c], date: today(), createdAt: ts(2000) },
         { id: uid('e'), groupId: g, description: 'Train passes', amountCents: 15000, paidBy: c, splitAmong: [a, c], date: today(), createdAt: ts(1000) },
       ],
