@@ -94,8 +94,10 @@
 
   /* ---------- member avatars ---------- */
 
-  var AVATAR_COLORS = ['#e11d48', '#d97706', '#059669', '#0284c7', '#7c3aed',
-                       '#db2777', '#65a30d', '#0d9488', '#4f46e5', '#be123c'];
+  // 12 hues spread around the wheel so neighbors never look alike.
+  var AVATAR_COLORS = ['#dc2626', '#ea580c', '#d97706', '#a3a307', '#65a30d',
+                       '#16a34a', '#0d9488', '#0891b2', '#2563eb', '#7c3aed',
+                       '#c026d3', '#db2777'];
 
   function hashStr(s) {
     var h = 0;
@@ -121,10 +123,22 @@
 
   function avatarHTML(member, members) {
     if (!member) return '';
-    // Color by normalized name: the same person gets the same color everywhere.
-    var color = AVATAR_COLORS[hashStr(normalizeName(member.name)) % AVATAR_COLORS.length];
-    return '<span class="avatar" style="background:' + color + '" title="' +
+    return '<span class="avatar" style="background:' + avatarColor(member, members) + '" title="' +
       esc(normalizeName(member.name)) + '">' + esc(avatarLabel(member, members)) + '</span>';
+  }
+
+  // Color by position in the member list (deduped by name), so the people
+  // you see together always get distinct colors. Falls back to the name
+  // hash when the member isn't in the list.
+  function avatarColor(member, members) {
+    var order = [], seen = {};
+    (members || []).forEach(function (m) {
+      var n = normalizeName(m.name);
+      if (!seen[n]) { seen[n] = true; order.push(n); }
+    });
+    var idx = order.indexOf(normalizeName(member.name));
+    if (idx === -1) idx = hashStr(normalizeName(member.name));
+    return AVATAR_COLORS[idx % AVATAR_COLORS.length];
   }
 
   function receiptURL(e) {
@@ -213,7 +227,7 @@
   }
   function wireMeChip() {
     var b = $('#me-btn');
-    if (b) b.addEventListener('click', function () { identityModal(false); });
+    if (b) b.addEventListener('click', function () { identityModal(!myName); });
   }
 
   // This identity's Venmo handle, from the first matching member row.
@@ -332,14 +346,18 @@
       function () { return backend.deleteGroup(groupId); });
   }
 
+  function groupHeaderHTML(g) {
+    return '<header class="top sub">' +
+      '<button class="back" id="back">‹</button>' +
+      '<h1>' + esc(g.name) + '</h1>' + syncDot() + meChipHTML();
+  }
+
   function renderGroup() {
     var g = state.groups.filter(function (x) { return x.id === view.id; })[0];
     if (!g) { view = { name: 'groups' }; render(); return; }
     var ms = membersOf(g.id);
 
-    var headerHtml = '<header class="top sub">' +
-      '<button class="back" id="back">‹</button>' +
-      '<h1>' + esc(g.name) + '</h1>' + syncDot() + meChipHTML();
+    var headerHtml = groupHeaderHTML(g);
 
     // Join gate: an identified non-member sees no group content — just the
     // prompt to join (or decline, which clears the identity).
@@ -585,23 +603,42 @@
   /* ---------- modals ---------- */
 
   // "Who are you?" picker (setup=true, first visit) or identity editor.
-  // Saving a new name renames this person's member rows in every group
-  // (skipping groups where the name is taken); saving a Venmo handle
-  // writes it to all of them.
+  // The editor has three jobs: switch to a known person, add a brand-new
+  // person (identity only — no member rows touched), and edit the current
+  // identity's name/Venmo (renames this person's member rows in every
+  // group, skipping groups where the name is taken).
   function identityModal(setup) {
     var names = knownNames().filter(function (n) { return n !== myName; });
     var listHtml = names.map(function (n) {
       return '<button class="id-pick" data-pick="' + esc(n) + '">' + esc(n) + '</button>';
     }).join('');
-    openModal('<h2>' + (setup ? 'Who are you?' : 'Your identity') + '</h2>' +
-      (setup ? '<p class="muted">Pick your name so the app can show your personal share.</p>' : '') +
-      (listHtml ? '<div class="id-list">' + listHtml + '</div><div class="or">or</div>' : '') +
-      '<label>Your name<input id="f-myname" maxlength="40" value="' + esc(myName || '') +
-      '" placeholder="e.g. Alex"></label>' +
-      (setup ? '' : '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" value="' +
-        esc(myVenmo()) + '" placeholder="@handle"></label>') +
+    if (setup) {
+      openModal('<h2>Who are you?</h2>' +
+        '<p class="muted">Pick your name so the app can show your personal share.</p>' +
+        (listHtml ? '<div class="id-list">' + listHtml + '</div><div class="or">or</div>' : '') +
+        '<label>Your name<input id="f-myname" maxlength="40" placeholder="e.g. Alex"></label>' +
+        '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
+        '<button class="btn primary" id="m-ok">Save</button></div>');
+      wireIdentityModal(null);
+      return;
+    }
+    openModal('<h2>Your identity</h2>' +
+      (listHtml
+        ? '<div class="sect-label">Switch to</div><div class="id-list">' + listHtml + '</div>'
+        : '') +
+      '<div class="sect-label">Add a new person</div>' +
+      '<div class="inline-row"><input id="f-newname" maxlength="40" placeholder="New name">' +
+      '<button class="btn" id="m-add-new">Add</button></div>' +
+      '<div class="sect-label">Edit ' + esc(myName || '') + '</div>' +
+      '<label>Display name<input id="f-myname" maxlength="40" value="' + esc(myName || '') + '"></label>' +
+      '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" value="' +
+      esc(myVenmo()) + '" placeholder="@handle"></label>' +
       '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
       '<button class="btn primary" id="m-ok">Save</button></div>');
+    wireIdentityModal(true);
+  }
+
+  function wireIdentityModal(isEditor) {
     $all('[data-pick]').forEach(function (el) {
       el.addEventListener('click', function () {
         myName = normalizeName(el.getAttribute('data-pick'));
@@ -610,11 +647,18 @@
         render();
       });
     });
+    var addBtn = $('#m-add-new');
+    if (addBtn) addBtn.addEventListener('click', function () {
+      var n = normalizeName($('#f-newname').value);
+      if (!n) { toast('Enter a name', true); return; }
+      myName = n; // fresh identity: no member rows are touched
+      saveMe();
+      closeModal();
+      render();
+    });
     $('#m-cancel').addEventListener('click', closeModal);
     $('#m-ok').addEventListener('click', function () {
-      var newName;
-      try { newName = normalizeName($('#f-myname').value); }
-      catch (_) { toast('Enter your name', true); return; }
+      var newName = normalizeName($('#f-myname').value);
       if (!newName) { toast('Enter your name', true); return; }
       var vEl = $('#f-myvenmo');
       var newVenmo = vEl ? vEl.value.trim().replace(/^@+/, '') : null;
@@ -744,7 +788,9 @@
   }
 
   // Gate: an identified user who isn't a member must join before viewing.
-  // Yes adds them; No clears the identity and goes back to the list.
+  // Joining shows a loading screen while the server confirms — the group
+  // content is never revealed optimistically. Declining keeps the identity
+  // and goes back to the list.
   function joinPromptModal(g) {
     openModal('<h2>Join this group?</h2>' +
       '<p>You must be a member of <b>' + esc(g.name) + '</b> to view it.</p>' +
@@ -753,16 +799,29 @@
       '<button class="btn primary" id="m-join">Join group</button></div>',
       { lock: true });
     $('#m-no').addEventListener('click', function () {
-      myName = null;
-      saveMe();
       view = { name: 'groups' };
       render();
     });
     $('#m-join').addEventListener('click', function () {
       var m = { id: uuid(), groupId: g.id, name: myName, venmo: myVenmo() };
-      mutate('Join group',
-        function () { state.members.push(m); },
-        function () { return backend.addMember(m); });
+      closeModal();
+      $('#app').innerHTML = demoBanner() + groupHeaderHTML(g) + '</header>' +
+        '<main class="wrap"><div class="loading"><span class="syncdot"></span>' +
+        '<p>Joining ' + esc(g.name) + '…</p></div></main>';
+      $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
+      wireMeChip();
+      pendingOps++;
+      opChain = opChain.then(function () {
+        return backend.addMember(m).then(function (out) {
+          pendingOps--;
+          setState(out.state);
+          render();
+        }).catch(function (err) {
+          pendingOps--;
+          toast('Join failed (' + (err && err.message || err) + ') — please try again.', true);
+          render(); // back to the join gate
+        });
+      });
     });
   }
 
