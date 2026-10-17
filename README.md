@@ -79,13 +79,19 @@ splitwise/
 - > If you edit `Code.gs` later, you must **Deploy → Manage deployments →
   > edit → New version**, otherwise the live URL keeps running the old code.
 
-**3. Point the frontend at it**
-- Open `frontend/config.js` and paste the URL:
-  ```js
-  const API_URL = "https://script.google.com/macros/s/…/exec";
-  ```
-- With the URL empty, the app runs in **demo mode**: fully usable, but data
-  stays in that browser's localStorage and isn't shared.
+**3. Point the frontend at it** (without committing the URL to git)
+- The Apps Script URL is a public-by-design endpoint (anyone with the link
+  can use the app), but there's no reason to publish it in a public repo.
+  `frontend/config.js` ships with an empty `API_URL`, and the real value is
+  injected at deploy time:
+  - **Netlify:** Site settings → Environment variables → add
+    `APPS_SCRIPT_URL` = your Web App URL, then redeploy. The build
+    (`build/inject-config.js`, wired in `netlify.toml`) stamps it into the
+    published files.
+  - **Docker:** pass `-e API_URL=…` — the entrypoint substitutes it at
+    container start.
+- With the variable unset, the app runs in **demo mode**: fully usable, but
+  data stays in that browser's localStorage and isn't shared.
 
 **4. Host the frontend folder** (any static host works — it's just files)
 - Easiest: drag the `frontend/` folder onto <https://app.netlify.com/drop>

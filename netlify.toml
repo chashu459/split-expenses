@@ -1,3 +1,7 @@
-# Netlify serves the static frontend directly — no build step.
+# Netlify build: copy frontend/ to dist/, injecting the Apps Script URL from
+# the APPS_SCRIPT_URL environment variable (set in the Netlify UI under
+# Site settings → Environment variables — never committed to git).
+# Without the variable, the site builds in demo mode.
 [build]
-  publish = "frontend"
+  publish = "dist"
+  command = "node build/inject-config.js"
