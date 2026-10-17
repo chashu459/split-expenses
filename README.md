@@ -99,6 +99,41 @@ splitwise/
 - Or locally for testing: `cd frontend && python3 -m http.server 8000`
 - Share the resulting link with your friends. Done.
 
+## Auto-deploying the backend (optional, one-time setup)
+
+A GitHub Action (`.github/workflows/deploy-backend.yml`) deploys
+`backend/Code.gs` to Apps Script on every push that touches it: it pushes the
+code, cuts a new version, and repoints your web app deployment at it — no
+more manual "New version" clicks. To enable it:
+
+**Google Cloud (one time, ~10 min):**
+1. Find the GCP project bound to your script: Apps Script editor →
+   Project Settings → Google Cloud Platform (GCP) Project → click the project
+   number. In the Cloud Console: APIs & Services → enable **Apps Script API**.
+2. APIs & Services → Credentials → Create Credentials → OAuth client ID →
+   Application type **Desktop app**. Copy the client ID and secret.
+3. APIs & Services → OAuth consent screen → add your own Google account as a
+   test user (the app stays in Testing mode — fine for personal use).
+
+**Mint a refresh token (on your own machine):**
+```bash
+APPS_SCRIPT_CLIENT_ID=... APPS_SCRIPT_CLIENT_SECRET=... node build/get-refresh-token.js
+```
+Open the printed URL in the browser logged into the script-owner account,
+approve, and copy the refresh token it prints.
+
+**GitHub repo → Settings → Secrets and variables → Actions**, add:
+| Secret | Value |
+|---|---|
+| `APPS_SCRIPT_CLIENT_ID` / `APPS_SCRIPT_CLIENT_SECRET` | from step 2 |
+| `APPS_SCRIPT_REFRESH_TOKEN` | from the helper above |
+| `APPS_SCRIPT_ID` | Apps Script editor → Project Settings → Script ID |
+| `APPS_SCRIPT_DEPLOYMENT_ID` | the ID in your web app URL: `/macros/s/<THIS>/exec` |
+
+That's it — the next push touching `backend/Code.gs` deploys itself. Until
+then, the manual flow still works: paste `Code.gs`, Deploy → Manage
+deployments → New version.
+
 ## The sheet schema
 
 | Tab | Columns |
