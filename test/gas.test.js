@@ -463,4 +463,63 @@ t('deleteGroup soft-deletes the group but keeps the row', () => {
   assert.match(r.res.error, /unknown group/);
 });
 
+t('updateMember edits name and venmo in place', () => {
+  post({ action: 'addMember', id: 'm-um1', groupId: 'g1', name: 'Uma' });
+  let r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', venmo: '@uma-pays' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.member.venmo, 'uma-pays', '@ stripped');
+  assert.strictEqual(r.res.member.name, 'Uma');
+  r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', name: 'uma thurman' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.member.name, 'Uma Thurman', 'title-cased');
+  const { res } = get('state');
+  const m = res.state.members.find((x) => x.id === 'm-um1');
+  assert.strictEqual(m.name, 'Uma Thurman');
+  assert.strictEqual(m.venmo, 'uma-pays');
+  r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', venmo: '' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.member.venmo, '', 'clears handle');
+});
+
+t('updateMember rejects dupes, bad handles, unknown members', () => {
+  let r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', name: 'Jiashu' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /already in this group/);
+  r = post({ action: 'updateMember', id: 'm-um1', groupId: 'g1', venmo: 'not a handle!' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /bad venmo handle/);
+  r = post({ action: 'updateMember', id: 'nope', groupId: 'g1', venmo: 'x' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /unknown member/);
+  r = post({ action: 'updateMember', groupId: 'g1', venmo: 'x' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /missing field/);
+});
+
+t('deleteMember removes inactive members, refuses active ones', () => {
+  post({ action: 'addMember', id: 'm-dm1', groupId: 'g1', name: 'Dee Emm' });
+  const before = sheets.members.getDataRange().getValues().length;
+  let r = post({ action: 'deleteMember', id: 'm-dm1', groupId: 'g1' });
+  assert.strictEqual(r.res.ok, true);
+  assert.strictEqual(r.res.state.members.filter((m) => m.id === 'm-dm1').length, 0);
+  assert.strictEqual(sheets.members.getDataRange().getValues().length, before - 1, 'row removed');
+  // active member: paid an expense
+  post({ action: 'addMember', id: 'm-dm2', groupId: 'g1', name: 'Dee Active' });
+  post({
+    action: 'addExpense', id: 'e-dm', groupId: 'g1', description: 'x',
+    amountCents: 500, paidBy: 'm-dm2', splitAmong: ['m-dm2'], date: '2026-10-17',
+  });
+  r = post({ action: 'deleteMember', id: 'm-dm2', groupId: 'g1' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /cannot be removed/);
+  r = post({ action: 'deleteMember', id: 'nope', groupId: 'g1' });
+  assert.strictEqual(r.res.ok, false);
+  assert.match(r.res.error, /unknown member/);
+  // activity log recorded both member mutations
+  const log = sheets.activity.getDataRange().getValues().slice(1);
+  const kinds = log.map((x) => String(x[2]));
+  assert.ok(kinds.includes('updateMember'), 'updateMember logged');
+  assert.ok(kinds.includes('deleteMember'), 'deleteMember logged');
+});
+
 console.log(passed + ' gas tests passed');

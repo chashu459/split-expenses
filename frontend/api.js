@@ -23,6 +23,10 @@
  *   deleteSettlement(id)                            -> { state }
  *   deleteGroup(id)                                 -> { state }
  *     Deletes are soft: rows are flagged deleted and hidden, never removed.
+ *   updateMember(groupId, id, {name?, venmo?})        -> { member, state }
+ *     Edits a member in place (rename and/or Venmo handle; '' clears it).
+ *   deleteMember(groupId, id)                         -> { state }
+ *     Removes a member only when they have no expenses or payments.
  *
  * Shapes (both backends normalize to these):
  *   group:      { id, name }
@@ -211,6 +215,16 @@ function SheetsBackend(url) {
     },
     deleteGroup: function (id) {
       return post({ action: 'deleteGroup', id: id }).then(function (r) { return withState(r); });
+    },
+    updateMember: function (groupId, id, patch) {
+      return post({
+        action: 'updateMember', id: id, groupId: groupId,
+        name: patch.name, venmo: patch.venmo,
+      }).then(function (r) { return withState(r, 'member', normMember); });
+    },
+    deleteMember: function (groupId, id) {
+      return post({ action: 'deleteMember', id: id, groupId: groupId })
+        .then(function (r) { return withState(r); });
     },
     uploadReceipt: function (r) {
       return post({
@@ -472,6 +486,43 @@ function DemoBackend() {
         g.deleted = true;
         log(s, 'deleteGroup', id, id, { name: g.name });
       }
+      save();
+      return Promise.resolve(snap(s));
+    },
+    updateMember: function (groupId, id, patch) {
+      var s = load();
+      var m = s.members.filter(function (x) { return x.id === id; })[0];
+      if (!m) return Promise.reject(new Error('unknown member'));
+      if (patch.name !== undefined) {
+        var name = titleCase(patch.name);
+        if (!name) return Promise.reject(new Error('name cannot be blank'));
+        var dupe = s.members.some(function (x) {
+          return x.id !== id && x.groupId === m.groupId && titleCase(x.name) === name;
+        });
+        if (dupe) return Promise.reject(new Error('that name is already in this group'));
+        m.name = name;
+      }
+      if (patch.venmo !== undefined) {
+        try { m.venmo = cleanVenmo(patch.venmo); }
+        catch (e) { return Promise.reject(e); }
+      }
+      log(s, 'updateMember', groupId, id, { name: m.name, venmo: m.venmo });
+      save();
+      return Promise.resolve({ member: clone(m), state: pub(s) });
+    },
+    deleteMember: function (groupId, id) {
+      var s = load();
+      var m = s.members.filter(function (x) { return x.id === id; })[0];
+      if (!m) return Promise.reject(new Error('unknown member'));
+      var active = s.expenses.some(function (e) {
+        return !e.deleted && (String(e.paidBy) === String(id) ||
+          e.splitAmong.map(String).indexOf(String(id)) !== -1);
+      }) || s.settlements.some(function (x) {
+        return !x.deleted && (String(x.fromId) === String(id) || String(x.toId) === String(id));
+      });
+      if (active) return Promise.reject(new Error('member has expenses or payments and cannot be removed'));
+      s.members = s.members.filter(function (x) { return x.id !== id; });
+      log(s, 'deleteMember', groupId, id, { name: m.name });
       save();
       return Promise.resolve(snap(s));
     },

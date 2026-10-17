@@ -119,6 +119,8 @@ function doPost(e) {
       case 'createGroup':      out = createGroup_(ss, db, body);      break;
       case 'addMember':        out = addMember_(ss, db, body);        break;
       case 'addMembers':       out = addMembers_(ss, db, body);       break;
+      case 'updateMember':     out = updateMember_(ss, db, body);     break;
+      case 'deleteMember':     out = deleteMember_(ss, db, body);     break;
       case 'addExpense':       out = addExpense_(ss, db, body);       break;
       case 'updateExpense':    out = updateExpense_(ss, db, body);    break;
       case 'addSettlement':    out = addSettlement_(ss, db, body);   break;
@@ -414,6 +416,68 @@ function addMembers_(ss, db, body) {
   return { members: added, skipped: skipped };
 }
 
+/** Edit a member in place: rename and/or set the Venmo handle ('' clears
+ *  it). Renames reject when another member of the same group already has
+ *  the name, so two people can never collide under one identity. */
+function updateMember_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var m = findById_(db.members, body.id);
+  if (!m) throw new Error('unknown member');
+  var updates = {};
+  if (body.name !== undefined) {
+    var name = normalizeMemberName_(body.name);
+    var dupe = db.members.some(function (x) {
+      return String(x.id) !== String(m.id) &&
+             String(x.group_id) === String(m.group_id) &&
+             normalizeMemberName_(x.name) === name;
+    });
+    if (dupe) throw new Error('that name is already in this group');
+    updates.name = name;
+  }
+  if (body.venmo !== undefined) updates.venmo = cleanVenmo_(body.venmo);
+  if (!Object.keys(updates).length) return { member: m };
+  var sheet = sheet_(ss, 'members');
+  var values = sheet.getDataRange().getValues();
+  var headers = values[0].map(String);
+  var row = -1;
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(body.id)) { row = r + 1; break; }
+  }
+  if (row === -1) throw new Error('unknown member');
+  Object.keys(updates).forEach(function (h) {
+    var c = headers.indexOf(h);
+    if (c === -1) throw new Error('missing column "' + h + '" — run bootstrap()');
+    sheet.getRange(row, c + 1).setValue(updates[h]);
+  });
+  Object.keys(updates).forEach(function (h) { m[h] = updates[h]; });
+  return { member: m };
+}
+
+/** Remove a member, but only when they have no expenses or payments in the
+ *  group — otherwise balances would dangle. The row is deleted outright
+ *  (there is nothing left to reference it) and the removal is logged. */
+function deleteMember_(ss, db, body) {
+  if (!body.id) throw new Error('missing field: id');
+  var m = findById_(db.members, body.id);
+  if (!m) throw new Error('unknown member');
+  var active =
+    db.expenses.some(function (e) {
+      return String(e.paid_by) === String(m.id) ||
+             e.split_among.map(String).indexOf(String(m.id)) !== -1;
+    }) ||
+    db.settlements.some(function (s) {
+      return String(s.from_id) === String(m.id) || String(s.to_id) === String(m.id);
+    });
+  if (active) throw new Error('member has expenses or payments and cannot be removed');
+  var sheet = sheet_(ss, 'members');
+  var values = sheet.getDataRange().getValues();
+  for (var r = 1; r < values.length; r++) {
+    if (String(values[r][0]) === String(m.id)) { sheet.deleteRow(r + 1); break; }
+  }
+  db.members = db.members.filter(function (x) { return String(x.id) !== String(m.id); });
+  return { memberId: m.id };
+}
+
 function addExpense_(ss, db, body) {
   need_(body, ['groupId', 'description', 'amountCents', 'paidBy', 'splitAmong', 'date']);
   var id = id_(body.id);
@@ -609,7 +673,11 @@ function logActivity_(ss, body, out) {
     case 'uploadReceipt':
       details = { expense_id: body.expenseId, name: body.name || '' };
       break;
-    // deleteExpense / deleteSettlement / deleteGroup: target id is enough
+    case 'updateMember':
+      details = { name: body.name, venmo: body.venmo };
+      break;
+    // deleteExpense / deleteSettlement / deleteGroup / deleteMember:
+    // target id is enough
   }
   var target = body.id || body.expenseId ||
     (out.group && out.group.id) || (out.member && out.member.id) ||

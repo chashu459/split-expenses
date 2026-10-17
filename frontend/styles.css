@@ -62,9 +62,6 @@ body {
 .group-name { font-weight: 600; }
 .group-meta { color: var(--muted); font-size: 13px; }
 
-.me-picker { display: block; margin: 4px 0 12px; font-size: 14px; color: var(--muted); }
-.me-picker select { margin-left: 6px; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); }
-
 .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
 .tab {
   flex: 1; padding: 10px; border: 1px solid var(--line); background: var(--card);
@@ -243,3 +240,53 @@ section h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; le
 /* receipt link */
 .receipt { text-decoration: none; margin-left: 4px; }
 a.receipt { cursor: pointer; }
+
+/* identity chip in the header */
+.me-chip {
+  background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.35);
+  color: #fff; border-radius: 999px; padding: 6px 12px; font-size: 13px;
+  cursor: pointer; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex-shrink: 0;
+}
+.me-chip:active { background: rgba(255,255,255,.28); }
+
+/* settings dropdown */
+.menu-wrap { position: relative; flex-shrink: 0; }
+.menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.15); min-width: 170px; overflow: hidden;
+}
+.menu button {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: 12px 14px; font-size: 15px; cursor: pointer; color: var(--ink);
+}
+.menu button:active { background: #f0fdf4; }
+
+/* identity picker */
+.id-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.id-pick {
+  border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+  padding: 8px 14px; font-size: 15px; cursor: pointer; color: var(--ink);
+}
+.id-pick:active { background: #f0fdf4; border-color: var(--green); }
+.or { text-align: center; color: var(--muted); font-size: 13px; margin: 10px 0; }
+
+/* members modal rows */
+.mem-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.mem-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-row .mem-venmo { display: inline-block; width: 110px; flex-shrink: 0; margin-top: 0; }
+.mem-lock { color: var(--muted); font-size: 15px; padding: 2px 6px; }
+
+/* group card delete */
+.group-card-wrap { position: relative; }
+.card-del {
+  position: absolute; top: 6px; right: 6px;
+  background: none; border: none; color: var(--muted);
+  font-size: 18px; cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 8px;
+}
+.card-del:active { background: #fee2e2; color: var(--red); }
+
+/* receipt preview in the edit modal */
+.receipt-now { margin: 10px 0 2px; font-size: 14px; }
+.receipt-now a { color: var(--green); font-weight: 600; }

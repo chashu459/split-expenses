@@ -206,17 +206,51 @@
     t._h = setTimeout(function () { t.className = 'toast'; }, 2600);
   }
 
+  function meChipHTML() {
+    var label = myName ? 'You are: <b>' + esc(myName) + '</b>' : 'Who are you?';
+    return '<button class="me-chip" id="me-btn" title="Your identity — tap to change">' +
+      label + '</button>';
+  }
+  function wireMeChip() {
+    var b = $('#me-btn');
+    if (b) b.addEventListener('click', function () { identityModal(false); });
+  }
+
+  // This identity's Venmo handle, from the first matching member row.
+  function myVenmo() {
+    if (!myName) return '';
+    for (var i = 0; i < state.members.length; i++) {
+      var m = state.members[i];
+      if (normalizeName(m.name) === myName && m.venmo) return m.venmo;
+    }
+    return '';
+  }
+  // Every distinct member name across groups, for the "who are you" picker.
+  function knownNames() {
+    var seen = {}, out = [];
+    state.members.forEach(function (m) {
+      var n = normalizeName(m.name);
+      if (n && !seen[n]) { seen[n] = true; out.push(n); }
+    });
+    out.sort();
+    return out;
+  }
+
   /* ---------- modal ---------- */
 
-  function openModal(html) {
+  function openModal(html, opts) {
     var ov = $('#overlay');
     ov.innerHTML = '<div class="modal">' + html + '</div>';
     ov.classList.add('open');
+    // opts.lock: the modal can't be dismissed by clicking the overlay
+    // (used for gates the user must answer, like joining a group).
+    ov._locked = !!(opts && opts.lock);
     var first = $('#overlay input, #overlay select');
     if (first) first.focus();
   }
   function closeModal() {
     var ov = $('#overlay');
+    ov._locked = false;
     ov.classList.remove('open');
     ov.innerHTML = '';
   }
@@ -247,16 +281,19 @@
       var ms = membersOf(g.id);
       var nExp = expensesOf(g.id).length;
       var faces = ms.slice(0, 5).map(function (m) { return avatarHTML(m, ms); }).join('');
-      return '<button class="group-card" data-group="' + esc(g.id) + '">' +
+      return '<div class="group-card-wrap">' +
+        '<button class="group-card" data-group="' + esc(g.id) + '">' +
         '<span class="group-faces">' + faces + '</span>' +
         '<span class="group-name">' + esc(g.name) + '</span>' +
         '<span class="group-meta">' + ms.length + ' people · ' + nExp + ' expenses</span>' +
-        '</button>';
+        '</button>' +
+        '<button class="card-del" data-del-group="' + esc(g.id) + '" title="Delete group">×</button>' +
+        '</div>';
     }).join('');
 
     $('#app').innerHTML =
       demoBanner() +
-      '<header class="top"><h1>Split it</h1>' + syncDot() + '</header>' +
+      '<header class="top"><h1>Split it</h1>' + syncDot() + meChipHTML() + '</header>' +
       '<main class="wrap">' +
         (cards || '<p class="empty">No groups yet. Start one below.</p>') +
         '<button class="btn primary block" id="new-group">+ New group</button>' +
@@ -268,47 +305,86 @@
         render();
       });
     });
+    $all('[data-del-group]').forEach(function (el) {
+      el.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        deleteGroupFlow(el.getAttribute('data-del-group'));
+      });
+    });
     $('#new-group').addEventListener('click', newGroupModal);
+    wireMeChip();
+  }
+
+  // Shared delete-group flow (list page only): warns about unsettled
+  // balances, then soft-deletes. Stays on the current view.
+  function deleteGroupFlow(groupId) {
+    var g = state.groups.filter(function (x) { return x.id === groupId; })[0];
+    if (!g) return;
+    var ms = membersOf(groupId);
+    var open = simplifyDebts(computeBalances(ms, expensesOf(groupId), settlementsOf(groupId))).length;
+    var msg = open > 0
+      ? 'This group still has ' + open + ' unsettled payment' + (open === 1 ? '' : 's') +
+        '. Delete the group anyway? It will be hidden from the app but kept in the sheet.'
+      : 'Delete this group? It will be hidden from the app but kept in the sheet.';
+    if (!confirm(msg)) return;
+    mutate('Delete group',
+      function () { state.groups = state.groups.filter(function (x) { return x.id !== groupId; }); },
+      function () { return backend.deleteGroup(groupId); });
   }
 
   function renderGroup() {
     var g = state.groups.filter(function (x) { return x.id === view.id; })[0];
     if (!g) { view = { name: 'groups' }; render(); return; }
     var ms = membersOf(g.id);
+
+    var headerHtml = '<header class="top sub">' +
+      '<button class="back" id="back">‹</button>' +
+      '<h1>' + esc(g.name) + '</h1>' + syncDot() + meChipHTML();
+
+    // Join gate: an identified non-member sees no group content — just the
+    // prompt to join (or decline, which clears the identity).
+    if (myName && !myId(g.id)) {
+      $('#app').innerHTML = demoBanner() + headerHtml + '</header>' +
+        '<main class="wrap"><p class="empty">You\'re not a member of this group yet.</p></main>';
+      $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
+      wireMeChip();
+      joinPromptModal(g);
+      return;
+    }
+
     var tab = view.tab || 'balances';
-
-    var mePicker = '<label class="me-picker">You are ' +
-      '<select id="me-select"><option value="">—</option>' +
-      ms.map(function (m) {
-        return '<option value="' + esc(m.id) + '"' +
-          (myId(g.id) === m.id ? ' selected' : '') + '>' + esc(normalizeName(m.name)) + '</option>';
-      }).join('') + '</select></label>';
-
     var body = tab === 'balances' ? balancesTab(g, ms) : expensesTab(g, ms);
 
     $('#app').innerHTML =
-      demoBanner() +
-      '<header class="top sub">' +
-        '<button class="back" id="back">‹</button>' +
-        '<h1>' + esc(g.name) + '</h1>' + syncDot() +
-        '<button class="icon-btn" id="add-member" title="Add person">＋</button>' +
+      demoBanner() + headerHtml +
+        '<button class="icon-btn" data-add-expense title="Add expense">＋</button>' +
+        '<div class="menu-wrap">' +
+          '<button class="icon-btn" id="settings-btn" title="Group settings">⚙</button>' +
+          '<div class="menu hidden" id="settings-menu">' +
+            '<button data-menu="members">Manage members</button>' +
+          '</div>' +
+        '</div>' +
       '</header>' +
-      '<main class="wrap">' + mePicker +
+      '<main class="wrap">' +
         '<div class="tabs">' +
           '<button class="tab' + (tab === 'balances' ? ' active' : '') + '" data-tab="balances">Balances</button>' +
           '<button class="tab' + (tab === 'expenses' ? ' active' : '') + '" data-tab="expenses">Expenses</button>' +
         '</div>' + body +
-        '<button class="btn danger block" id="delete-group">Delete group</button>' +
       '</main>';
 
     $('#back').addEventListener('click', function () { view = { name: 'groups' }; render(); });
-    $('#add-member').addEventListener('click', function () { addMemberModal(g); });
-    $('#me-select').addEventListener('change', function (ev) {
-      var m = memberById(ev.target.value);
-      myName = m ? normalizeName(m.name) : null;
-      saveMe();
-      render();
+    $all('[data-add-expense]').forEach(function (el) {
+      el.addEventListener('click', function () { expenseModal(g, ms, null); });
     });
+    $('#settings-btn').addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      $('#settings-menu').classList.toggle('hidden');
+    });
+    $('#settings-menu [data-menu="members"]').addEventListener('click', function () {
+      $('#settings-menu').classList.add('hidden');
+      membersModal(g);
+    });
+    wireMeChip();
     $all('[data-tab]').forEach(function (el) {
       el.addEventListener('click', function () {
         view.tab = el.getAttribute('data-tab');
@@ -450,7 +526,7 @@
           '<span class="exp-sub">' + formatMoney(e.amountCents) + ' total · ' +
           esc(displayName(g.id, e.paidBy)) + ' paid · split: ' + who + splitNote + '</span></div></div>' +
           '<div class="exp-right">' + myExpenseAmt(g, e) +
-          '<button class="edit-btn" data-edit-exp="' + esc(e.id) + '" title="Edit">✎</button></div>' +
+          '<button class="edit-btn" data-edit-exp="' + esc(e.id) + '" title="Details">ⓘ</button></div>' +
           '</div>',
       });
     });
@@ -481,26 +557,13 @@
       html += item.html;
     });
 
-    return '<button class="btn primary block" id="add-expense">+ Add expense</button>' +
+    return '<button class="btn primary block" data-add-expense>+ Add expense</button>' +
       '<section>' + (html || '<p class="empty">No expenses yet.</p>') + '</section>';
   }
 
   function wireGroupButtons(g, ms) {
     var b;
-    if ((b = $('#add-expense'))) b.addEventListener('click', function () { expenseModal(g, ms, null); });
     if ((b = $('#settle'))) b.addEventListener('click', function () { settleModal(g, ms); });
-    if ((b = $('#delete-group'))) b.addEventListener('click', function () {
-      var open = simplifyDebts(computeBalances(ms, expensesOf(g.id), settlementsOf(g.id))).length;
-      var msg = open > 0
-        ? 'This group still has ' + open + ' unsettled payment' + (open === 1 ? '' : 's') +
-          '. Delete the group anyway? It will be hidden from the app but kept in the sheet.'
-        : 'Delete this group? It will be hidden from the app but kept in the sheet.';
-      if (!confirm(msg)) return;
-      view = { name: 'groups' };
-      mutate('Delete group',
-        function () { state.groups = state.groups.filter(function (x) { return x.id !== g.id; }); },
-        function () { return backend.deleteGroup(g.id); });
-    });
     $all('[data-edit-exp]').forEach(function (el) {
       el.addEventListener('click', function () {
         var id = el.getAttribute('data-edit-exp');
@@ -520,6 +583,89 @@
   }
 
   /* ---------- modals ---------- */
+
+  // "Who are you?" picker (setup=true, first visit) or identity editor.
+  // Saving a new name renames this person's member rows in every group
+  // (skipping groups where the name is taken); saving a Venmo handle
+  // writes it to all of them.
+  function identityModal(setup) {
+    var names = knownNames().filter(function (n) { return n !== myName; });
+    var listHtml = names.map(function (n) {
+      return '<button class="id-pick" data-pick="' + esc(n) + '">' + esc(n) + '</button>';
+    }).join('');
+    openModal('<h2>' + (setup ? 'Who are you?' : 'Your identity') + '</h2>' +
+      (setup ? '<p class="muted">Pick your name so the app can show your personal share.</p>' : '') +
+      (listHtml ? '<div class="id-list">' + listHtml + '</div><div class="or">or</div>' : '') +
+      '<label>Your name<input id="f-myname" maxlength="40" value="' + esc(myName || '') +
+      '" placeholder="e.g. Alex"></label>' +
+      (setup ? '' : '<label>Venmo handle (optional)<input id="f-myvenmo" maxlength="32" value="' +
+        esc(myVenmo()) + '" placeholder="@handle"></label>') +
+      '<div class="modal-actions"><button class="btn" id="m-cancel">Cancel</button>' +
+      '<button class="btn primary" id="m-ok">Save</button></div>');
+    $all('[data-pick]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        myName = normalizeName(el.getAttribute('data-pick'));
+        saveMe();
+        closeModal();
+        render();
+      });
+    });
+    $('#m-cancel').addEventListener('click', closeModal);
+    $('#m-ok').addEventListener('click', function () {
+      var newName;
+      try { newName = normalizeName($('#f-myname').value); }
+      catch (_) { toast('Enter your name', true); return; }
+      if (!newName) { toast('Enter your name', true); return; }
+      var vEl = $('#f-myvenmo');
+      var newVenmo = vEl ? vEl.value.trim().replace(/^@+/, '') : null;
+      if (newVenmo && !/^[A-Za-z0-9._-]{1,30}$/.test(newVenmo)) {
+        toast('Bad Venmo handle', true); return;
+      }
+      saveIdentity(newName, newVenmo);
+    });
+  }
+
+  function saveIdentity(newName, newVenmo) {
+    var oldName = myName;
+    var rows = oldName ? state.members.filter(function (m) {
+      return normalizeName(m.name) === oldName;
+    }) : [];
+    var skippedGroups = [];
+    var targets = [];
+    rows.forEach(function (m) {
+      var collision = newName !== oldName && state.members.some(function (x) {
+        return x.id !== m.id && x.groupId === m.groupId &&
+               normalizeName(x.name) === newName;
+      });
+      if (collision) { skippedGroups.push(m.groupId); return; }
+      targets.push(m);
+    });
+    mutate('Save identity',
+      function () {
+        targets.forEach(function (m) {
+          m.name = newName;
+          if (newVenmo !== null) m.venmo = newVenmo;
+        });
+        myName = newName;
+        saveMe();
+      },
+      function () {
+        var chain = Promise.resolve(null);
+        targets.forEach(function (m) {
+          chain = chain.then(function () {
+            var patch = { name: newName };
+            if (newVenmo !== null) patch.venmo = newVenmo;
+            return backend.updateMember(m.groupId, m.id, patch);
+          });
+        });
+        return chain.then(function (last) {
+          return last ? { state: last.state } : { state: state };
+        });
+      });
+    if (skippedGroups.length) {
+      toast('Name taken in ' + skippedGroups.length + ' group(s) — left unchanged there.', true);
+    }
+  }
 
   function newGroupModal() {
     openModal('<h2>New group</h2>' +
@@ -597,6 +743,98 @@
     });
   }
 
+  // Gate: an identified user who isn't a member must join before viewing.
+  // Yes adds them; No clears the identity and goes back to the list.
+  function joinPromptModal(g) {
+    openModal('<h2>Join this group?</h2>' +
+      '<p>You must be a member of <b>' + esc(g.name) + '</b> to view it.</p>' +
+      '<p class="muted">Join as <b>' + esc(myName) + '</b>?</p>' +
+      '<div class="modal-actions"><button class="btn" id="m-no">No</button>' +
+      '<button class="btn primary" id="m-join">Join group</button></div>',
+      { lock: true });
+    $('#m-no').addEventListener('click', function () {
+      myName = null;
+      saveMe();
+      view = { name: 'groups' };
+      render();
+    });
+    $('#m-join').addEventListener('click', function () {
+      var m = { id: uuid(), groupId: g.id, name: myName, venmo: myVenmo() };
+      mutate('Join group',
+        function () { state.members.push(m); },
+        function () { return backend.addMember(m); });
+    });
+  }
+
+  // Group settings → member list: edit Venmo handles, add people, remove
+  // members that have no expenses or payments (locked otherwise).
+  function membersModal(g) {
+    var ms = membersOf(g.id);
+    function isActive(id) {
+      return state.expenses.some(function (e) {
+        return e.groupId === g.id && (String(e.paidBy) === String(id) ||
+          e.splitAmong.map(String).indexOf(String(id)) !== -1);
+      }) || state.settlements.some(function (s) {
+        return s.groupId === g.id &&
+          (String(s.fromId) === String(id) || String(s.toId) === String(id));
+      });
+    }
+    var rows = ms.map(function (m) {
+      var locked = isActive(m.id);
+      return '<div class="mem-row">' + avatarHTML(m, ms) +
+        '<span class="mem-name">' + esc(m.name) + '</span>' +
+        '<input class="mem-venmo" data-venmo="' + esc(m.id) + '" value="' + esc(m.venmo || '') +
+        '" placeholder="@venmo" maxlength="32">' +
+        (locked
+          ? '<span class="mem-lock" title="Has expenses or payments — cannot be removed">🔒</span>'
+          : '<button class="del" data-del-member="' + esc(m.id) +
+            '" title="Remove from group">×</button>') +
+        '</div>';
+    }).join('');
+    openModal('<h2>Members</h2>' +
+      (rows || '<p class="empty">No members yet.</p>') +
+      '<div class="modal-actions"><button class="btn" id="m-add">+ Add people</button>' +
+      '<button class="btn" id="m-cancel">Close</button>' +
+      '<button class="btn primary" id="m-save">Save</button></div>');
+    $('#m-cancel').addEventListener('click', closeModal);
+    $('#m-add').addEventListener('click', function () { addMemberModal(g); });
+    $all('[data-del-member]').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var id = el.getAttribute('data-del-member');
+        var m = memberById(id);
+        if (!m || !confirm('Remove ' + m.name + ' from this group?')) return;
+        mutate('Remove member',
+          function () {
+            state.members = state.members.filter(function (x) { return x.id !== id; });
+          },
+          function () { return backend.deleteMember(g.id, id); });
+      });
+    });
+    $('#m-save').addEventListener('click', function () {
+      var changes = [], bad = false;
+      $all('[data-venmo]').forEach(function (inp) {
+        var m = memberById(inp.getAttribute('data-venmo'));
+        if (!m) return;
+        var v = inp.value.trim().replace(/^@+/, '');
+        if (v !== '' && !/^[A-Za-z0-9._-]{1,30}$/.test(v)) { bad = true; return; }
+        if (v !== (m.venmo || '')) changes.push({ m: m, venmo: v });
+      });
+      if (bad) { toast('Bad Venmo handle', true); return; }
+      if (!changes.length) { closeModal(); return; }
+      mutate('Save members',
+        function () { changes.forEach(function (c) { c.m.venmo = c.venmo; }); },
+        function () {
+          var chain = Promise.resolve(null);
+          changes.forEach(function (c) {
+            chain = chain.then(function () {
+              return backend.updateMember(g.id, c.m.id, { venmo: c.venmo });
+            });
+          });
+          return chain.then(function (last) { return { state: last.state }; });
+        });
+    });
+  }
+
   /* Downscale a receipt photo client-side so uploads stay small. */
   function processReceipt(file) {
     return new Promise(function (resolve, reject) {
@@ -629,8 +867,8 @@
   }
 
   // Shared add/edit expense form. `existing` is null for a new expense;
-  // when set, the form is prefilled, saving updates in place, and a Delete
-  // button appears (receipts are left untouched on edit).
+  // when set, the form is prefilled, saving updates in place, a Delete
+  // button appears, and the receipt can be viewed/replaced.
   function expenseModal(g, ms, existing) {
     if (ms.length < 1) { toast('Add people to the group first', true); return; }
     var me = myId(g.id);
@@ -645,6 +883,20 @@
       return '<option value="' + esc(m.id) + '"' + (sel ? ' selected' : '') + '>' +
         esc(m.name) + '</option>';
     }).join('');
+    // Receipt block: in edit mode show the current receipt (if any) with a
+    // preview link, plus a picker to replace it.
+    var receiptBlock;
+    if (!isEdit) {
+      receiptBlock = '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>';
+    } else if (existing.receiptId) {
+      var rurl = receiptURL(existing);
+      receiptBlock = '<div class="receipt-now">🧾 ' +
+        (rurl ? '<a href="' + rurl + '" target="_blank" rel="noopener">View current receipt</a>'
+              : '<span class="muted">Receipt attached</span>') + '</div>' +
+        '<label>Replace receipt<input id="f-receipt" type="file" accept="image/*"></label>';
+    } else {
+      receiptBlock = '<label>Add receipt<input id="f-receipt" type="file" accept="image/*"></label>';
+    }
     function inEqual(id) {
       return existing
         ? existing.splitAmong.map(String).indexOf(String(id)) !== -1
@@ -685,7 +937,7 @@
       (existing ? esc(fmtDate(existing.date)) : todayISO()) + '"></label>' +
       '</div>' +
       '<label>Paid by<select id="f-paid">' + paidOpts + '</select></label>' +
-      (isEdit ? '' : '<label>Receipt (optional)<input id="f-receipt" type="file" accept="image/*"></label>') +
+      receiptBlock +
       '<div class="seg" id="split-mode">' +
         '<button data-mode="equal"' + (splitMode === 'equal' ? ' class="active"' : '') + '>Equal split</button>' +
         '<button data-mode="custom"' + (splitMode === 'custom' ? ' class="active"' : '') + '>Custom amounts</button>' +
@@ -854,6 +1106,7 @@
         split = sids2; // members without an amount are left out of the split
       }
       view.tab = 'expenses';
+      var file = receiptFile;
       if (isEdit) {
         var updated = {
           id: existing.id, groupId: g.id,
@@ -871,7 +1124,17 @@
               if (state.expenses[i].id === existing.id) { state.expenses[i] = updated; break; }
             }
           },
-          function () { return backend.updateExpense(updated); });
+          function () {
+            return backend.updateExpense(updated).then(function (out) {
+              if (!file) return out;
+              return processReceipt(file).then(function (b64) {
+                return backend.uploadReceipt({
+                  expenseId: existing.id, name: file.name || 'receipt.jpg',
+                  mimeType: 'image/jpeg', data: b64,
+                });
+              });
+            });
+          });
         return;
       }
       var ex = {
@@ -884,7 +1147,6 @@
         receiptId: '',
         date: $('#f-date').value || todayISO(),
       };
-      var file = receiptFile;
       mutate('Add expense',
         function () { state.expenses.push(ex); },
         function () {
@@ -984,6 +1246,8 @@
       setState(s);
       migrateLegacyMe();
       render();
+      // First visit: ask who they are so personal amounts work right away.
+      if (!myName) identityModal(true);
     }).catch(function (err) {
       $('#app').innerHTML = '<main class="wrap"><p class="empty">Couldn\'t load data: ' +
         esc(err.message) + '</p><button class="btn primary block" id="retry">Retry</button></main>';
@@ -993,7 +1257,16 @@
 
   document.addEventListener('DOMContentLoaded', function () {
     $('#overlay').addEventListener('click', function (ev) {
-      if (ev.target.id === 'overlay') closeModal();
+      if (ev.target.id === 'overlay' && !ev.currentTarget._locked) closeModal();
+    });
+    // Dismiss the group settings menu on any outside tap (wired once —
+    // renderGroup rebuilds the menu every render, so it can't own this).
+    document.addEventListener('click', function (ev) {
+      var menu = document.getElementById('settings-menu');
+      if (menu && !menu.classList.contains('hidden') &&
+          !ev.target.closest('.menu-wrap')) {
+        menu.classList.add('hidden');
+      }
     });
     loadMe();
     refresh();

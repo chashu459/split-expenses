@@ -37,13 +37,24 @@ friend's browser ──▶ static web page (frontend/)
 - **Venmo integration**: if a member has a Venmo handle, the "record a
   payment" form shows a *Pay with Venmo* button that deep-links into Venmo
   with the amount, recipient, and note prefilled.
-- **Edit expenses** any time (the delete button lives inside the edit form).
+- **Edit expenses** any time via the ⓘ button on a row — the form doubles as
+  the expense's detail view, shows a **preview of the attached receipt**, and
+  lets you replace it. The delete button lives inside the edit form.
 - The Expenses tab is grouped by date (**Today / Yesterday / …**) and shows
   **your personal share** on each row (what you lent or borrowed), not just
   the total.
-- **Delete a group** from the bottom of its page — with a warning if balances
-  aren't settled. Deletes are **soft**: expenses, payments, and groups are
-  flagged as deleted and hidden, never removed from the sheet.
+- **Identity**: the header shows *You are: \<name\>*. First visit asks who you
+  are; tapping the chip lets you rename yourself or set your Venmo handle
+  (written to your member rows in every group).
+- **Join gate**: opening a group you're not part of asks you to join first —
+  declining clears your identity and takes you back to the list.
+- **Group settings (⚙)**: manage members — edit Venmo handles, batch-add
+  people, and remove members who have no expenses or payments.
+- **Delete a group** from its × button on the groups list — with a warning if
+  balances aren't settled. Deletes are **soft**: expenses, payments, and
+  groups are flagged as deleted and hidden, never removed from the sheet.
+  Members can only be removed while they have no activity, and are then
+  deleted outright (nothing references them).
 - Every change is written to an **`activity` tab** in the sheet — an
   append-only audit log of who added/edited/removed what.
 - The Apps Script uses `LockService` so two friends saving at once can't corrupt a row.
