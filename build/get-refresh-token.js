@@ -14,6 +14,10 @@
  * It prints a URL: open it in the browser logged into the Google account that
  * owns the script, approve access, and the script prints the refresh token.
  * Save it as the APPS_SCRIPT_REFRESH_TOKEN GitHub secret (never commit it).
+ *
+ * Scopes requested (the minimum the deploy script needs):
+ *   script.projects    - push code (updateContent) and cut versions
+ *   script.deployments - repoint the web app deployment at the new version
  */
 const http = require('http');
 
@@ -67,7 +71,7 @@ server.listen(PORT, () => {
       client_id: clientId,
       redirect_uri: REDIRECT,
       response_type: 'code',
-      scope: 'https://www.googleapis.com/auth/script.projects',
+      scope: 'https://www.googleapis.com/auth/script.projects https://www.googleapis.com/auth/script.deployments',
       access_type: 'offline',
       prompt: 'consent',
     });

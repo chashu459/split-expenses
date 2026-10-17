@@ -7,9 +7,10 @@
  * Runs in CI (see .github/workflows/deploy-backend.yml). All env vars required:
  *
  *   APPS_SCRIPT_CLIENT_ID / APPS_SCRIPT_CLIENT_SECRET / APPS_SCRIPT_REFRESH_TOKEN
- *     OAuth client for the Apps Script API. The refresh token needs the
- *     https://www.googleapis.com/auth/script.projects scope —
- *     mint one with: node build/get-refresh-token.js
+ *     OAuth client for the Apps Script API. The refresh token needs two scopes:
+ *       https://www.googleapis.com/auth/script.projects    (push code, cut versions)
+ *       https://www.googleapis.com/auth/script.deployments  (repoint the web app deployment)
+ *     Mint one with: node build/get-refresh-token.js
  *   APPS_SCRIPT_ID
  *     Apps Script editor -> Project Settings -> Script ID
  *   APPS_SCRIPT_DEPLOYMENT_ID
