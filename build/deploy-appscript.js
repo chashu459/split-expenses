@@ -82,11 +82,14 @@ async function api(at, method, url, body) {
   });
   console.log('version created:', ver.versionNumber);
 
-  // 3. point the live web app deployment at it
-  await api(at, 'PUT', `${base}/deployments/${deploymentId}`, {
-    versionNumber: ver.versionNumber,
-    manifestFileName: 'appsscript',
-    description: 'Split it web app',
-  });
+  // 3. point the live web app deployment at the new version.
+  //    Fetch the deployment first and echo its config back with only the
+  //    version bumped, so web app access settings etc. are preserved.
+  //    (The API nests versionNumber/manifestFileName/description under
+  //    deploymentConfig; top-level fields are rejected with 400.)
+  const dep = await api(at, 'GET', `${base}/deployments/${deploymentId}`);
+  const cfg = dep.deploymentConfig || {};
+  cfg.versionNumber = ver.versionNumber;
+  await api(at, 'PUT', `${base}/deployments/${deploymentId}`, { deploymentConfig: cfg });
   console.log('deployment now serving version', ver.versionNumber);
 })().catch((e) => { console.error('deploy failed:', e.message); process.exit(1); });
